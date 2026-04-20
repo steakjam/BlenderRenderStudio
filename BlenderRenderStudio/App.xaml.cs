@@ -1,50 +1,33 @@
-﻿using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Data;
-using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Navigation;
-using Microsoft.UI.Xaml.Shapes;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Runtime.InteropServices.WindowsRuntime;
-using Windows.ApplicationModel;
-using Windows.ApplicationModel.Activation;
-using Windows.Foundation;
-using Windows.Foundation.Collections;
+using Microsoft.UI.Xaml;
+using System.Threading.Tasks;
 
-// To learn more about WinUI, the WinUI project structure,
-// and more about our project templates, see: http://aka.ms/winui-project-info.
+namespace BlenderRenderStudio;
 
-namespace BlenderRenderStudio
+public partial class App : Application
 {
-    /// <summary>
-    /// Provides application-specific behavior to supplement the default Application class.
-    /// </summary>
-    public partial class App : Application
+    private Window? _window;
+
+<<<<<<< HEAD
+    /// <summary>当前主窗口实例（供 FileOpenPicker 等需要 hwnd 的组件使用）</summary>
+    public static Window CurrentWindow { get; private set; } = null!;
+
+=======
+>>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
+    public App()
     {
-        private Window? _window;
+        InitializeComponent();
+        // 全局兜底：防止 fire-and-forget Task 的未观察异常导致 0xC000027B 崩溃
+        TaskScheduler.UnobservedTaskException += (_, e) => e.SetObserved();
+        UnhandledException += (_, e) => e.Handled = true;
+    }
 
-        /// <summary>
-        /// Initializes the singleton application object.  This is the first line of authored code
-        /// executed, and as such is the logical equivalent of main() or WinMain().
-        /// </summary>
-        public App()
-        {
-            InitializeComponent();
-        }
-
-        /// <summary>
-        /// Invoked when the application is launched.
-        /// </summary>
-        /// <param name="args">Details about the launch request and process.</param>
-        protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
-        {
-            _window = new MainWindow();
-            _window.Activate();
-        }
+    protected override void OnLaunched(LaunchActivatedEventArgs args)
+    {
+        _window = new MainWindow();
+<<<<<<< HEAD
+        CurrentWindow = _window;
+=======
+>>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
+        _window.Activate();
     }
 }

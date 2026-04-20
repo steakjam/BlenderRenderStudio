@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="BlenderRenderStudio.Pages.BatchQueuePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:BlenderRenderStudio.Models">
+
+    <Grid Padding="32,24" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- 标题 + 控制按钮 -->
+        <Grid>
+            <StackPanel>
+                <TextBlock Text="渲染队列" Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock x:Name="QueueStatusText" Text="就绪" FontSize="13"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="0,2,0,0" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+                <Button x:Name="BtnStartQueue" Style="{StaticResource AccentButtonStyle}" Click="StartQueue_Click">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE768;" FontSize="14" />
+                        <TextBlock Text="开始" />
+                    </StackPanel>
+                </Button>
+                <Button x:Name="BtnPauseQueue" Click="PauseQueue_Click" IsEnabled="False">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE769;" FontSize="14" />
+                        <TextBlock Text="暂停" />
+                    </StackPanel>
+                </Button>
+                <Button Click="StopQueue_Click" IsEnabled="False" x:Name="BtnStopQueue">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE71A;" FontSize="14" />
+                        <TextBlock Text="停止" />
+                    </StackPanel>
+                </Button>
+                <Button Click="SkipCurrent_Click" x:Name="BtnSkip" IsEnabled="False"
+                        ToolTipService.ToolTip="跳过当前项目，渲染下一个">
+                    <FontIcon Glyph="&#xE893;" FontSize="14" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- 全局进度 -->
+        <StackPanel Grid.Row="1" Spacing="4">
+            <ProgressBar x:Name="GlobalProgress" Maximum="100" Height="6" CornerRadius="3" />
+            <Grid>
+                <TextBlock x:Name="GlobalProgressText" FontSize="12"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock x:Name="GlobalEta" FontSize="12" HorizontalAlignment="Right"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </Grid>
+        </StackPanel>
+
+        <!-- 队列列表 -->
+        <ListView x:Name="QueueList" Grid.Row="2"
+                  ItemsSource="{x:Bind QueueService.Jobs, Mode=OneWay}"
+                  SelectionMode="None" CanReorderItems="True" AllowDrop="True"
+                  IsItemClickEnabled="False" DoubleTapped="QueueList_DoubleTapped">
+            <ListView.ItemContainerTransitions>
+                <TransitionCollection>
+                    <AddDeleteThemeTransition />
+                    <RepositionThemeTransition />
+                </TransitionCollection>
+            </ListView.ItemContainerTransitions>
+            <ListView.ItemTemplate>
+                <DataTemplate x:DataType="models:RenderJob">
+                    <Border CornerRadius="6" Padding="12,10" Margin="0,2"
+                            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderThickness="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+                        <Grid RowSpacing="6">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <!-- 拖拽手柄 -->
+                                <FontIcon Glyph="&#xE700;" FontSize="14"
+                                          Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                          VerticalAlignment="Center" />
+
+                                <!-- 项目信息 -->
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                    <TextBlock Text="{x:Bind ProjectName, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}">
+                                        <Run Text="{x:Bind CompletedFrames, Mode=OneWay}" /><Run Text=" / " /><Run Text="{x:Bind TotalFrames, Mode=OneWay}" /><Run Text=" 帧" />
+                                    </TextBlock>
+                                </StackPanel>
+
+                                <!-- 状态标签 -->
+                                <Border Grid.Column="2" CornerRadius="4" Padding="8,4" VerticalAlignment="Center"
+                                        Background="{ThemeResource ControlFillColorSecondaryBrush}">
+                                    <TextBlock FontSize="12" Text="{x:Bind StatusDisplayText, Mode=OneWay}" />
+                                </Border>
+
+                                <!-- 移除按钮 -->
+                                <Button Grid.Column="3" Padding="4" VerticalAlignment="Center"
+                                        Tag="{x:Bind ProjectId}" Click="RemoveJob_Click"
+                                        ToolTipService.ToolTip="从队列移除">
+                                    <FontIcon Glyph="&#xE711;" FontSize="12" />
+                                </Button>
+                            </Grid>
+
+                            <!-- 进度条 -->
+                            <ProgressBar Grid.Row="1" Value="{x:Bind ProgressPercent, Mode=OneWay}"
+                                         Maximum="100" Height="4" CornerRadius="2" />
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <!-- 空状态 -->
+        <StackPanel Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8"
+                    Visibility="{x:Bind IsQueueEmpty, Mode=OneWay}">
+            <FontIcon Glyph="&#xE8CB;" FontSize="48" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+            <TextBlock Text="渲染队列为空" FontSize="16" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       HorizontalAlignment="Center" />
+            <TextBlock Text="在项目页面中将项目添加到队列" FontSize="13"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
+        </StackPanel>
+    </Grid>
+</Page>

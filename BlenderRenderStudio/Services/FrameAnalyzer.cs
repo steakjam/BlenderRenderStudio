@@ -25,6 +25,9 @@ public static class FrameAnalyzer
     /// <param name="imagePath">渲染输出图片绝对路径</param>
     /// <param name="brightnessThreshold">黑帧判定阈值（0~255），低于此值视为黑帧</param>
     /// <param name="maxSamples">最大采样像素数，0 = 全量</param>
+    /// <summary>分析用缩放上限：480px 宽足够做亮度统计，4K→480 = 33MB→0.5MB</summary>
+    private const uint AnalysisMaxWidth = 480;
+
     public static async Task<AnalysisResult?> AnalyzeAsync(
         string imagePath,
         double brightnessThreshold = 5.0,
@@ -36,15 +39,27 @@ public static class FrameAnalyzer
             using var stream = await file.OpenReadAsync();
             var decoder = await BitmapDecoder.CreateAsync(stream);
 
+            // 缩放解码：亮度分析不需要全分辨率，480px 宽足够
+            // 4K(3840×2160) 全量解码 = 33MB byte[]，缩放到 480×270 仅 0.5MB
+            var transform = new BitmapTransform();
+            if (decoder.PixelWidth > AnalysisMaxWidth)
+            {
+                double scale = (double)AnalysisMaxWidth / decoder.PixelWidth;
+                transform.ScaledWidth = AnalysisMaxWidth;
+                transform.ScaledHeight = (uint)(decoder.PixelHeight * scale);
+            }
+
             var pixelData = await decoder.GetPixelDataAsync(
                 BitmapPixelFormat.Bgra8,
                 BitmapAlphaMode.Ignore,
-                new BitmapTransform(),
+                transform,
                 ExifOrientationMode.IgnoreExifOrientation,
                 ColorManagementMode.DoNotColorManage);
 
             var pixels = pixelData.DetachPixelData();
-            int totalPixels = (int)(decoder.PixelWidth * decoder.PixelHeight);
+            int scaledWidth = transform.ScaledWidth > 0 ? (int)transform.ScaledWidth : (int)decoder.PixelWidth;
+            int scaledHeight = transform.ScaledHeight > 0 ? (int)transform.ScaledHeight : (int)decoder.PixelHeight;
+            int totalPixels = scaledWidth * scaledHeight;
             int stride = 4; // BGRA8
 
             // 确定采样步长

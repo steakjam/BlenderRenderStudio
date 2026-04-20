@@ -6,18 +6,43 @@ using System.Text.Json.Serialization;
 namespace BlenderRenderStudio.Services;
 
 /// <summary>
-/// 将用户配置持久化到 %LocalAppData%/BlenderRenderStudio/settings.json。
+/// 将用户配置持久化到操作系统标准应用数据目录。
+/// - MSIX 打包模式：Windows.Storage.ApplicationData.Current.LocalFolder（系统隔离）
+/// - 未打包模式（Debug）：%LocalAppData%/BlenderRenderStudio
 /// </summary>
 public class SettingsService
 {
-    private static readonly string SettingsDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "BlenderRenderStudio");
-
+    private static readonly string SettingsDir = GetAppLocalDir();
     private static readonly string SettingsPath = Path.Combine(SettingsDir, "settings.json");
+
+    /// <summary>应用配置数据目录（供日志显示）</summary>
+    public static string StorageDir => SettingsDir;
 
     /// <summary>进度文件固定在设置目录下，不受工作目录影响。</summary>
     public static string ProgressFilePath => Path.Combine(SettingsDir, "render_progress.txt");
+
+    /// <summary>磁盘缩略图缓存目录（240px 原始像素，避免重复 WIC 解码）</summary>
+    public static string ThumbnailCacheDir => Path.Combine(SettingsDir, "thumbcache");
+
+    /// <summary>
+    /// 获取应用本地数据目录。打包模式使用 ApplicationData API（系统自动隔离清理），
+    /// 未打包模式回退到 %LocalAppData%。
+    /// </summary>
+    private static string GetAppLocalDir()
+    {
+        try
+        {
+            // MSIX 打包模式：ApplicationData 已按应用隔离，无需子目录
+            return Windows.Storage.ApplicationData.Current.LocalFolder.Path;
+        }
+        catch
+        {
+            // 未打包模式（WindowsPackageType=None）：手动在 %LocalAppData% 创建子目录
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "BlenderRenderStudio");
+        }
+    }
 
     public static UserSettings Load()
     {
@@ -41,7 +66,10 @@ public class SettingsService
             });
             File.WriteAllText(SettingsPath, json);
         }
-        catch { /* ignore */ }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SettingsService.Save] 保存失败: {ex.Message}  路径: {SettingsPath}");
+        }
     }
 }
 
@@ -55,6 +83,9 @@ public class UserSettings
 
     [JsonPropertyName("outputPath")]
     public string OutputPath { get; set; } = string.Empty;
+
+    [JsonPropertyName("outputPrefix")]
+    public string OutputPrefix { get; set; } = "frame_";
 
     [JsonPropertyName("startFrame")]
     public int StartFrame { get; set; } = 1;
@@ -91,4 +122,7 @@ public class UserSettings
 
     [JsonPropertyName("singleFrameNumber")]
     public int SingleFrameNumber { get; set; } = 1;
+
+    [JsonPropertyName("showLogPanel")]
+    public bool ShowLogPanel { get; set; } = false;
 }

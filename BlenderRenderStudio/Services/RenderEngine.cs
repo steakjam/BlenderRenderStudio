@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Channels;
@@ -62,6 +63,7 @@ public class RenderEngine
         finally
         {
             IsRunning = false;
+            RenderRecovery.ClearSession();
             RenderCompleted?.Invoke();
         }
     }
@@ -115,16 +117,19 @@ public class RenderEngine
 
         while (currentStart <= _config.EndFrame && !ct.IsCancellationRequested)
         {
-            // ── 跳过磁盘上已存在输出文件的连续帧 ──
-            while (currentStart <= _config.EndFrame)
+            // ── 跳过磁盘上已存在输出文件的连续帧（仅续渲模式启用）──
+            if (_config.SkipExistingFrames)
             {
-                var existingFile = RenderConfig.FindFrameFile(_config.OutputPath, currentStart);
-                if (existingFile == null) break;
-                Log?.Invoke("skip", $"帧 {currentStart} 输出已存在，跳过");
-                FrameSaved?.Invoke(currentStart, existingFile);
-                TotalSavedFrames++;
-                currentStart++;
-                SaveProgress(currentStart);
+                while (currentStart <= _config.EndFrame)
+                {
+                    var existingFile = RenderConfig.FindFrameFile(_config.OutputPath, currentStart);
+                    if (existingFile == null) break;
+                    Log?.Invoke("skip", $"帧 {currentStart} 输出已存在，跳过");
+                    FrameSaved?.Invoke(currentStart, existingFile);
+                    TotalSavedFrames++;
+                    currentStart++;
+                    SaveProgress(currentStart);
+                }
             }
 
             if (currentStart > _config.EndFrame || ct.IsCancellationRequested) break;
@@ -176,6 +181,20 @@ public class RenderEngine
         Log?.Invoke("batch", $"批次 {startFrame}-{endFrame}");
 
         var args = _config.BuildCommand(startFrame, endFrame);
+
+        // 启动前校验：路径不存在时给出明确错误，而非让 process.Start 抛通用异常
+        if (!File.Exists(args[0]))
+        {
+            Log?.Invoke("error", $"Blender 可执行文件不存在: {args[0]}");
+            return -1;
+        }
+        if (args.Length >= 3 && !File.Exists(args[2]))
+        {
+            Log?.Invoke("error", $"Blend 文件不存在: {args[2]}");
+            return -1;
+        }
+        Log?.Invoke("info", $"启动命令: {string.Join(" ", args)}");
+
         var psi = new ProcessStartInfo
         {
             FileName = args[0],
@@ -184,6 +203,7 @@ public class RenderEngine
             UseShellExecute = false,
             CreateNoWindow = true,
             StandardOutputEncoding = System.Text.Encoding.UTF8,
+            StandardErrorEncoding = System.Text.Encoding.UTF8,
         };
         for (int i = 1; i < args.Length; i++)
             psi.ArgumentList.Add(args[i]);
@@ -197,7 +217,9 @@ public class RenderEngine
         var savedFrames = new HashSet<int>();
         bool restartPending = false;
         string restartNote = "";
+        double lastFrameTime = 0; // 累积当前帧的渲染时间，仅在帧保存时上报
         var memMonitor = new MemoryMonitor(_config.MemoryThreshold, _config.MemoryPollSeconds);
+        double lastSampleUpdateTime = 0; // UI 节流：采样进度最多 5次/秒
 
         try
         {
@@ -205,7 +227,14 @@ public class RenderEngine
             CurrentFrame = startFrame;
             FrameStarted?.Invoke(startFrame);
 
-            // 合并 stdout + stderr（Blender 将渲染进度输出到 stderr，等同于 Python 的 stderr=subprocess.STDOUT）
+<<<<<<< HEAD
+            // 保存 PID 用于闪退后恢复监控
+            try { RenderRecovery.SaveSession(process.Id, _config.ProjectId ?? "", _config.OutputPath, _config.StartFrame, _config.EndFrame); }
+            catch { /* 非关键路径 */ }
+
+=======
+>>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
+            // 合并 stdout + stderr（Blender 将渲染进度输出到 stderr）
             var lineChannel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
 
             var stdoutTask = Task.Run(async () =>
@@ -220,33 +249,53 @@ public class RenderEngine
                 catch { /* stream closed */ }
             });
 
+            // 当 stdout+stderr 都关闭后，完成 channel
             _ = Task.Run(async () =>
             {
-                await Task.WhenAll(stdoutTask, stderrTask);
-                lineChannel.Writer.TryComplete();
+                try
+                {
+                    await Task.WhenAll(stdoutTask, stderrTask);
+                    lineChannel.Writer.TryComplete();
+                }
+                catch { lineChannel.Writer.TryComplete(); }
             });
+
+            // 【修复】进程退出后强制关闭 channel，防止子进程持有句柄导致永久阻塞
+            process.Exited += (_, _) =>
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+<<<<<<< HEAD
+                        // 给残余输出 2 秒的冲刷时间（传入 ct 确保窗口关闭时立即取消）
+                        await Task.Delay(2000, ct);
+=======
+                        // 给残余输出 2 秒的冲刷时间
+                        await Task.Delay(2000);
+>>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
+                        lineChannel.Writer.TryComplete();
+                    }
+                    catch { lineChannel.Writer.TryComplete(); }
+                });
+            };
 
             await foreach (var rawLine in lineChannel.Reader.ReadAllAsync(ct))
             {
                 if (string.IsNullOrWhiteSpace(rawLine)) continue;
                 var line = rawLine.Trim();
 
-                // 内存检测
-                if (!restartPending)
+                // 内存检测（合并为单次调用，避免每行双 P/Invoke）
+                var memStatus = memMonitor.Check();
+                if (memStatus != null)
                 {
-                    var memStatus = memMonitor.Check();
-                    if (memStatus is { IsOverThreshold: true })
+                    SystemMemoryUpdate?.Invoke(memStatus.PhysicalUsed, memStatus.CommitUsed);
+                    if (!restartPending && memStatus.IsOverThreshold)
                     {
                         restartPending = true;
                         restartNote = $"sys={memStatus.PhysicalUsed:F1}% commit={memStatus.CommitUsed:F1}%";
-                        SystemMemoryUpdate?.Invoke(memStatus.PhysicalUsed, memStatus.CommitUsed);
                     }
                 }
-
-                // 系统内存定期上报
-                var sysCheck = memMonitor.Check();
-                if (sysCheck != null)
-                    SystemMemoryUpdate?.Invoke(sysCheck.PhysicalUsed, sysCheck.CommitUsed);
 
                 // 解析 Fra: / Mem:
                 var frameMatch = FrameRe.Match(line);
@@ -257,6 +306,7 @@ public class RenderEngine
                     {
                         currentFrame = newFrame;
                         CurrentFrame = newFrame;
+                        lastFrameTime = 0; // 新帧开始，重置计时
                         FrameStarted?.Invoke(newFrame);
                     }
                 }
@@ -268,17 +318,30 @@ public class RenderEngine
                     BlenderMemoryUpdate?.Invoke(blenderMem);
                 }
 
-                // Sample 进度
+                // Time: 与 Fra:/Mem: 同层解析（不 continue），因为 Time: 和 Sample 在同一行
+                var timeMatch = TimeRe.Match(line);
+                if (timeMatch.Success)
+                {
+                    double? sec = ParseTime(timeMatch.Groups[1].Value);
+                    if (sec.HasValue) lastFrameTime = sec.Value;
+                }
+
+                // Sample 进度（节流：最多 5次/秒，避免 UI 线程洪泛）
                 var sampleMatch = SampleRe.Match(line);
                 if (sampleMatch.Success)
                 {
                     sampleCur = int.Parse(sampleMatch.Groups[1].Value);
                     sampleTotal = int.Parse(sampleMatch.Groups[2].Value);
-                    SampleProgress?.Invoke(sampleCur, sampleTotal);
+                    double now = Environment.TickCount64 / 1000.0;
+                    if (now - lastSampleUpdateTime >= 0.2 || sampleCur >= sampleTotal)
+                    {
+                        lastSampleUpdateTime = now;
+                        SampleProgress?.Invoke(sampleCur, sampleTotal);
+                    }
                     continue;
                 }
 
-                // Saved
+                // Saved —— 帧渲染完成
                 var savedMatch = SavedRe.Match(line);
                 if (savedMatch.Success)
                 {
@@ -291,6 +354,13 @@ public class RenderEngine
                     FrameSaved?.Invoke(currentFrame, outputPath);
                     Log?.Invoke("saved", $"帧 {currentFrame} → {outputPath}");
 
+                    // 【修复】仅在帧完成时上报最终渲染耗时，而非每行 Time: 都上报
+                    if (lastFrameTime > 0)
+                    {
+                        FrameTimeUpdate?.Invoke(lastFrameTime);
+                        lastFrameTime = 0;
+                    }
+
                     if (restartPending)
                     {
                         StopProcess();
@@ -301,17 +371,10 @@ public class RenderEngine
                     continue;
                 }
 
-                // Time
-                var timeMatch = TimeRe.Match(line);
-                if (timeMatch.Success)
-                {
-                    double? sec = ParseTime(timeMatch.Groups[1].Value);
-                    if (sec.HasValue) FrameTimeUpdate?.Invoke(sec.Value);
-                    continue;
-                }
-
-                // 过滤 Blender 插件在 headless 模式下的无害报错
-                if (line.Contains("bpy.app.handlers.") || line.Contains("Error in bpy.app"))
+                // 过滤 Blender 在 headless 模式下的无害日志
+                if (line.Contains("bpy.app.handlers.") || line.Contains("Error in bpy.app")
+                    || line.Contains("Not freed memory blocks")
+                    || line.Contains("depsgraph WARNING"))
                     continue;
 
                 // Error / Warning
@@ -326,8 +389,13 @@ public class RenderEngine
                     continue;
                 }
 
-                // 其他行
-                Log?.Invoke("debug", line);
+                // 其他行（不再逐行转发到 UI，仅在调试模式下有意义的行才记录）
+                // 过滤掉 Blender 逐行渲染进度（Fra:/Mem:/Time: 开头的行已解析过）
+                if (!frameMatch.Success && !memMatch.Success && !timeMatch.Success
+                    && line.Length > 10 && !line.StartsWith("Read ", StringComparison.Ordinal))
+                {
+                    Log?.Invoke("debug", line);
+                }
             }
 
             if (ct.IsCancellationRequested)
@@ -341,7 +409,9 @@ public class RenderEngine
                 return -1;
             }
 
-            await process.WaitForExitAsync(ct);
+            // 进程可能已退出（Exited 事件触发了 TryComplete），直接获取退出码
+            if (!process.HasExited)
+                await process.WaitForExitAsync(ct);
             return process.ExitCode;
         }
         catch (OperationCanceledException)
@@ -349,9 +419,14 @@ public class RenderEngine
             StopProcess();
             return -1;
         }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            Log?.Invoke("error", $"无法启动 Blender 进程: {ex.Message} (NativeErrorCode={ex.NativeErrorCode})");
+            return -1;
+        }
         catch (Exception ex)
         {
-            Log?.Invoke("error", $"进程异常: {ex.Message}");
+            Log?.Invoke("error", $"渲染进程异常: {ex.GetType().Name}: {ex.Message}");
             return -1;
         }
         finally

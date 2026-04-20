@@ -47,14 +47,18 @@ public class AsyncRelayCommand : ICommand
     public async void Execute(object? parameter)
     {
         if (_isRunning) return;
-        _isRunning = true;
-        _cts = new CancellationTokenSource();
-        RaiseCanExecuteChanged();
-        try { await _execute(_cts.Token); }
+        try
+        {
+            _isRunning = true;
+            _cts = new CancellationTokenSource();
+            RaiseCanExecuteChanged();
+            await _execute(_cts.Token);
+        }
+        catch { /* 防止 async void 未处理异常导致 0xC000027B */ }
         finally
         {
             _isRunning = false;
-            _cts.Dispose();
+            _cts?.Dispose();
             _cts = null;
             RaiseCanExecuteChanged();
         }

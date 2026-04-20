@@ -1,8 +1,9 @@
+using System;
 using BlenderRenderStudio.Models;
 using Microsoft.UI;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Media;
-using System;
 
 namespace BlenderRenderStudio.Converters;
 
@@ -24,6 +25,64 @@ public class FrameStatusToBrushConverter : IValueConverter
         }
         return new SolidColorBrush(Colors.Gray);
     }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+        => throw new NotImplementedException();
+}
+
+/// <summary>网格卡片背景色：BlackFrame→黄色半透明，Error→红色半透明，其他→默认卡片色</summary>
+public class FrameStatusToCardBrushConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        if (value is FrameStatus status)
+        {
+            return status switch
+            {
+                FrameStatus.BlackFrame => new SolidColorBrush(Windows.UI.Color.FromArgb(40, 255, 165, 0)),
+                FrameStatus.Error => new SolidColorBrush(Windows.UI.Color.FromArgb(40, 255, 0, 0)),
+                _ => new SolidColorBrush(Colors.Transparent),
+            };
+        }
+        return new SolidColorBrush(Colors.Transparent);
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+        => throw new NotImplementedException();
+}
+
+/// <summary>未渲染帧淡化：Pending→0.4，其他→1.0</summary>
+public class FrameStatusToOpacityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        if (value is FrameStatus status)
+            return status == FrameStatus.Pending ? 0.4 : 1.0;
+        return 1.0;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+        => throw new NotImplementedException();
+}
+
+/// <summary>渲染中帧显示 ProgressRing</summary>
+public class FrameStatusToRingVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        if (value is FrameStatus status)
+            return status == FrameStatus.Rendering ? Visibility.Visible : Visibility.Collapsed;
+        return Visibility.Collapsed;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language)
+        => throw new NotImplementedException();
+}
+
+public class BoolToVisibilityConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, string language)
+        => value is true ? Visibility.Visible : Visibility.Collapsed;
 
     public object ConvertBack(object value, Type targetType, object parameter, string language)
         => throw new NotImplementedException();

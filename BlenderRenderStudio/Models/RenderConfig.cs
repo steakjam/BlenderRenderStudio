@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 
@@ -35,6 +36,15 @@ public class RenderConfig
     /// <summary>单帧模式下要渲染的帧号</summary>
     public int SingleFrameNumber { get; set; } = 1;
 
+    /// <summary>是否跳过磁盘上已存在的帧文件（仅续渲时启用）</summary>
+    public bool SkipExistingFrames { get; set; }
+
+<<<<<<< HEAD
+    /// <summary>所属项目 ID（用于 PID 恢复跟踪）</summary>
+    public string? ProjectId { get; set; }
+
+=======
+>>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
     public string[] BuildCommand(int startFrame, int endFrame)
     {
         var args = new List<string> { BlenderPath, "-b", BlendFilePath };
@@ -61,30 +71,57 @@ public class RenderConfig
     }
 
     /// <summary>
-    /// 根据输出路径模式（含 # 占位符）查找磁盘上已存在的帧输出文件。
-    /// Blender 将 ##### 替换为左补零的帧号，扩展名由场景输出格式决定。
+    /// 根据输出路径模式查找磁盘上已存在的帧输出文件。
+    /// 支持两种模式：
+    /// 1. 含 # 占位符（如 frame_#####）→ 替换为左补零帧号
+    /// 2. 无 # 的目录/前缀路径 → 用 Blender 默认命名（4位补零）查找
     /// </summary>
     public static string? FindFrameFile(string outputPattern, int frame)
     {
         if (string.IsNullOrWhiteSpace(outputPattern)) return null;
 
-        int hashStart = outputPattern.IndexOf('#');
-        if (hashStart < 0) return null;
-
-        int hashEnd = hashStart;
-        while (hashEnd < outputPattern.Length && outputPattern[hashEnd] == '#') hashEnd++;
-        int hashCount = hashEnd - hashStart;
-
-        string frameStr = frame.ToString().PadLeft(hashCount, '0');
-        string basePath = outputPattern[..hashStart] + frameStr + outputPattern[hashEnd..];
-
         string[] exts = [".png", ".jpg", ".jpeg", ".exr", ".tiff", ".tif", ".bmp", ".hdr"];
-        foreach (var ext in exts)
-        {
-            string fullPath = basePath + ext;
-            if (File.Exists(fullPath)) return fullPath;
-        }
 
-        return File.Exists(basePath) ? basePath : null;
+        int hashStart = outputPattern.IndexOf('#');
+        if (hashStart >= 0)
+        {
+            // 模式1：含 # 占位符
+            int hashEnd = hashStart;
+            while (hashEnd < outputPattern.Length && outputPattern[hashEnd] == '#') hashEnd++;
+            int hashCount = hashEnd - hashStart;
+
+            string frameStr = frame.ToString().PadLeft(hashCount, '0');
+            string basePath = outputPattern[..hashStart] + frameStr + outputPattern[hashEnd..];
+
+            foreach (var ext in exts)
+            {
+                string fullPath = basePath + ext;
+                if (File.Exists(fullPath)) return fullPath;
+            }
+
+            return File.Exists(basePath) ? basePath : null;
+        }
+        else
+        {
+            // 模式2：无 # 占位符，Blender 默认在路径末尾追加帧号
+            // 确保路径以目录分隔符结尾（如果是目录路径）
+            string prefix = outputPattern;
+            if (Directory.Exists(prefix) && !prefix.EndsWith('\\') && !prefix.EndsWith('/'))
+                prefix += Path.DirectorySeparatorChar;
+
+            // 尝试常见的补零宽度（Blender 默认4位，也试其他宽度）
+            foreach (int pad in new[] { 4, 1, 2, 3, 5, 6 })
+            {
+                string frameStr = frame.ToString().PadLeft(pad, '0');
+                string basePath = prefix + frameStr;
+                foreach (var ext in exts)
+                {
+                    if (File.Exists(basePath + ext)) return basePath + ext;
+                }
+                if (File.Exists(basePath)) return basePath;
+            }
+
+            return null;
+        }
     }
 }
