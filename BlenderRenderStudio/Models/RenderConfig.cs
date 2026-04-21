@@ -39,12 +39,9 @@ public class RenderConfig
     /// <summary>是否跳过磁盘上已存在的帧文件（仅续渲时启用）</summary>
     public bool SkipExistingFrames { get; set; }
 
-<<<<<<< HEAD
     /// <summary>所属项目 ID（用于 PID 恢复跟踪）</summary>
     public string? ProjectId { get; set; }
 
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
     public string[] BuildCommand(int startFrame, int endFrame)
     {
         var args = new List<string> { BlenderPath, "-b", BlendFilePath };

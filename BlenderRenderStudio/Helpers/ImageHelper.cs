@@ -3,10 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Security.Cryptography;
 using System.Text;
-<<<<<<< HEAD
 using System.Threading;
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Graphics.Imaging;
@@ -47,15 +44,12 @@ public sealed class DecodedImage : IDisposable
 public static class ImageHelper
 {
     /// <summary>
-<<<<<<< HEAD
     /// 正在执行 SetBitmapAsync 的计数器。
     /// FlushPendingDispose 检查此值，非零时跳过 Dispose，
     /// 避免 D2D device 竞态导致 0xC000027B。
     /// </summary>
     internal static volatile int _activeSourceCreations;
     /// <summary>
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
     /// 解码图片到 SoftwareBitmap（可在任意线程调用）。
     /// 保证输出尺寸不超过 decodePixelWidth，即使原始编解码器不支持 BitmapTransform。
     /// </summary>
@@ -157,7 +151,6 @@ public static class ImageHelper
     {
         try
         {
-<<<<<<< HEAD
             System.Diagnostics.Trace.WriteLine($"[IMG] CreateSourceAsync: bitmap={decoded.Bitmap?.PixelWidth}x{decoded.Bitmap?.PixelHeight}");
             var source = new SoftwareBitmapSource();
 
@@ -179,15 +172,6 @@ public static class ImageHelper
         catch (Exception ex)
         {
             System.Diagnostics.Trace.WriteLine($"[IMG] !! CreateSourceAsync 异常: {ex.GetType().Name}: {ex.Message}");
-=======
-            var source = new SoftwareBitmapSource();
-            await source.SetBitmapAsync(decoded.Bitmap);
-            decoded.Dispose(); // SetBitmapAsync 已复制数据，释放原始 SoftwareBitmap
-            return source;
-        }
-        catch
-        {
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
             decoded.Dispose();
             return null;
         }

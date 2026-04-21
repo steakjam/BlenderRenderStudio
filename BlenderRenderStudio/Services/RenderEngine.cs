@@ -227,13 +227,10 @@ public class RenderEngine
             CurrentFrame = startFrame;
             FrameStarted?.Invoke(startFrame);
 
-<<<<<<< HEAD
             // 保存 PID 用于闪退后恢复监控
             try { RenderRecovery.SaveSession(process.Id, _config.ProjectId ?? "", _config.OutputPath, _config.StartFrame, _config.EndFrame); }
             catch { /* 非关键路径 */ }
 
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
             // 合并 stdout + stderr（Blender 将渲染进度输出到 stderr）
             var lineChannel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = true });
 
@@ -267,13 +264,8 @@ public class RenderEngine
                 {
                     try
                     {
-<<<<<<< HEAD
                         // 给残余输出 2 秒的冲刷时间（传入 ct 确保窗口关闭时立即取消）
                         await Task.Delay(2000, ct);
-=======
-                        // 给残余输出 2 秒的冲刷时间
-                        await Task.Delay(2000);
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
                         lineChannel.Writer.TryComplete();
                     }
                     catch { lineChannel.Writer.TryComplete(); }

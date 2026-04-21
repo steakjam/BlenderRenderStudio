@@ -8,11 +8,7 @@ using System.Threading.Tasks;
 using BlenderRenderStudio.Helpers;
 using BlenderRenderStudio.Models;
 using BlenderRenderStudio.Services;
-<<<<<<< HEAD
 using Microsoft.UI.Xaml;
-=======
-using Microsoft.UI.Dispatching;
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 
@@ -23,10 +19,7 @@ public class MainViewModel : ObservableObject
     private readonly RenderEngine _engine = new();
     private readonly SafeDispatcher _safeDispatcher;
     private CancellationTokenSource? _cts;
-<<<<<<< HEAD
     private CancellationTokenSource? _thumbnailCts; // 缩略图批量加载取消令牌
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
     private bool _isStopping; // 用户主动停止标记，防止 RenderCompleted 覆盖进度
 
     // ── 配置属性 ────────────────────────────────────────────────────
@@ -138,12 +131,9 @@ public class MainViewModel : ObservableObject
 
     public bool IsRendering { get => _isRendering; set { SetProperty(ref _isRendering, value); OnPropertyChanged(nameof(IsNotRendering)); RaiseCommands(); } }
     public bool IsNotRendering => !IsRendering;
-<<<<<<< HEAD
 
     /// <summary>是否由本 ViewModel 的 RenderEngine 发起的渲染（区别于闪退恢复的外部进程）</summary>
     public bool IsRenderingLocally { get; set; }
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
     public double OverallProgress { get => _overallProgress; set { if (SetProperty(ref _overallProgress, value)) OnPropertyChanged(nameof(OverallProgressText)); } }
     public string OverallProgressText => OverallProgress.ToString("F1");
     public int CurrentFrame { get => _currentFrame; set => SetProperty(ref _currentFrame, value); }
@@ -163,14 +153,9 @@ public class MainViewModel : ObservableObject
         set
         {
             var old = _previewImage;
-<<<<<<< HEAD
             System.Diagnostics.Trace.WriteLine($"[VM] PreviewImage setter: old={old?.GetType().Name ?? "null"}, new={value?.GetType().Name ?? "null"}");
             if (SetProperty(ref _previewImage, value))
                 ScheduleDispose(old);
-=======
-            if (SetProperty(ref _previewImage, value))
-                (old as IDisposable)?.Dispose(); // 立即释放旧 SoftwareBitmapSource 的 D2D 纹理
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
         }
     }
     public string StatusText { get => _statusText; set => SetProperty(ref _statusText, value); }
@@ -187,7 +172,6 @@ public class MainViewModel : ObservableObject
     public bool IsGridView
     {
         get => _isGridView;
-<<<<<<< HEAD
         set
         {
             if (SetProperty(ref _isGridView, value))
@@ -205,9 +189,6 @@ public class MainViewModel : ObservableObject
     {
         _thumbnailCts?.Cancel();
         _thumbnailCts = null;
-=======
-        set { if (SetProperty(ref _isGridView, value)) OnPropertyChanged(nameof(IsSingleView)); }
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
     }
 
     /// <summary>是否处于全屏预览模式（隐藏左侧面板/状态栏/日志）</summary>
@@ -427,10 +408,7 @@ public class MainViewModel : ObservableObject
             }
 
             IsRendering = false;
-<<<<<<< HEAD
             IsRenderingLocally = false;
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
             OverallProgress = 100;
             EstimatedRemaining = "00:00";
             StatusText = OutputType == RenderOutputType.Video
@@ -500,10 +478,7 @@ public class MainViewModel : ObservableObject
         }
 
         IsRendering = true;
-<<<<<<< HEAD
         IsRenderingLocally = true;
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
         _isStopping = false;
         BlackFrameCount = 0;
         ErrorFrameCount = 0;
@@ -587,10 +562,7 @@ public class MainViewModel : ObservableObject
             OutputType = OutputType,
             SingleFrameNumber = SingleFrameNumber,
             SkipExistingFrames = isResuming,
-<<<<<<< HEAD
             ProjectId = ProjectId,
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
         };
 
         _cts = new CancellationTokenSource();
@@ -880,12 +852,9 @@ public class MainViewModel : ObservableObject
             var source = await ImageHelper.CreateSourceAsync(decoded);
             if (source != null)
             {
-<<<<<<< HEAD
                 // ScheduleDispose 旧 source，防止 GC finalizer 在错误线程释放 D2D 纹理
                 if (thumb.Image != null && thumb.Image != source)
                     ScheduleDispose(thumb.Image);
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
                 _gridCache.Put(path, source);
                 thumb.Image = source;
             }
@@ -902,7 +871,6 @@ public class MainViewModel : ObservableObject
     /// </summary>
     public async Task RefreshGridThumbnailsAsync()
     {
-<<<<<<< HEAD
         // 取消上一次未完成的加载
         _thumbnailCts?.Cancel();
         _thumbnailCts = new CancellationTokenSource();
@@ -918,11 +886,6 @@ public class MainViewModel : ObservableObject
         // 如果后续 _gridCache.Get 命中则会将已排队释放的 source 重新绑定到新 UI
         // → FlushPendingDispose 执行 Dispose 时 XAML 渲染线程仍在使用 → 0xC000027B
         _gridCache.Clear();
-=======
-        foreach (var old in GridThumbnails)
-            old.Image = null;
-        GridThumbnails.Clear();
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
 
         var thumbsToLoad = new List<(FrameThumbnail thumb, string path)>();
         var cacheDir = SettingsService.ThumbnailCacheDir;
@@ -957,7 +920,6 @@ public class MainViewModel : ObservableObject
         var semaphore = new SemaphoreSlim(maxConcurrent);
         var tasks = thumbsToLoad.Select(async item =>
         {
-<<<<<<< HEAD
             await semaphore.WaitAsync(CancellationToken.None);
             try
             {
@@ -966,15 +928,6 @@ public class MainViewModel : ObservableObject
                 DecodedImage? decoded = null;
                 bool fromCache = false;
 
-=======
-            await semaphore.WaitAsync();
-            try
-            {
-                DecodedImage? decoded = null;
-                bool fromCache = false;
-
-                // 尝试磁盘缓存（零 WIC，纯内存拷贝，极快）
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
                 var cacheKey = ImageHelper.GetCacheKey(item.path);
                 if (!string.IsNullOrEmpty(cacheKey))
                 {
@@ -983,12 +936,7 @@ public class MainViewModel : ObservableObject
                     if (decoded != null) fromCache = true;
                 }
 
-<<<<<<< HEAD
                 if (decoded == null && !ct.IsCancellationRequested)
-=======
-                // 缓存未命中：WIC 解码原始文件
-                if (decoded == null)
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
                     decoded = await ImageHelper.DecodeAsync(item.path, decodePixelWidth: 240);
 
                 if (decoded != null)
@@ -1006,7 +954,6 @@ public class MainViewModel : ObservableObject
         int batchCount = 0;
         foreach (var item in decodeResults)
         {
-<<<<<<< HEAD
             if (ct.IsCancellationRequested)
             {
                 item.decoded?.Dispose();
@@ -1015,11 +962,6 @@ public class MainViewModel : ObservableObject
 
             try
             {
-=======
-            try
-            {
-                // 缓存未命中：写入磁盘缓存供下次使用
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
                 if (!item.fromCache)
                 {
                     var cacheKey = ImageHelper.GetCacheKey(item.path);
@@ -1031,22 +973,15 @@ public class MainViewModel : ObservableObject
                 }
 
                 var source = await Helpers.ImageHelper.CreateSourceAsync(item.decoded);
-<<<<<<< HEAD
                 if (source != null && !ct.IsCancellationRequested)
-=======
-                if (source != null)
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
                 {
                     _gridCache.Put(item.path, source);
                     item.thumb.Image = source;
                 }
-<<<<<<< HEAD
                 else if (source != null)
                 {
                     ScheduleDispose(source);
                 }
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
             }
             catch
             {
@@ -1066,14 +1001,11 @@ public class MainViewModel : ObservableObject
     /// </summary>
     public async Task LoadMissingThumbnailsAsync()
     {
-<<<<<<< HEAD
         // 取消上一次未完成的加载
         _thumbnailCts?.Cancel();
         _thumbnailCts = new CancellationTokenSource();
         var ct = _thumbnailCts.Token;
 
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
         var thumbsToLoad = new List<(FrameThumbnail thumb, string path)>();
         foreach (var thumb in GridThumbnails)
         {
@@ -1099,17 +1031,11 @@ public class MainViewModel : ObservableObject
         var semaphore = new SemaphoreSlim(maxConcurrent);
         var tasks = thumbsToLoad.Select(async item =>
         {
-<<<<<<< HEAD
             await semaphore.WaitAsync(CancellationToken.None);
             try
             {
                 if (ct.IsCancellationRequested) return;
 
-=======
-            await semaphore.WaitAsync();
-            try
-            {
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
                 DecodedImage? decoded = null;
                 bool fromCache = false;
 
@@ -1121,11 +1047,7 @@ public class MainViewModel : ObservableObject
                     if (decoded != null) fromCache = true;
                 }
 
-<<<<<<< HEAD
                 if (decoded == null && !ct.IsCancellationRequested)
-=======
-                if (decoded == null)
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
                     decoded = await Helpers.ImageHelper.DecodeAsync(item.path, decodePixelWidth: 240);
 
                 if (decoded != null)
@@ -1140,7 +1062,6 @@ public class MainViewModel : ObservableObject
         int batchCount = 0;
         foreach (var item in decodeResults)
         {
-<<<<<<< HEAD
             // 视图已切走或页面已卸载 → 释放已解码数据，停止创建 D2D surface
             if (ct.IsCancellationRequested)
             {
@@ -1148,8 +1069,6 @@ public class MainViewModel : ObservableObject
                 continue;
             }
 
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
             try
             {
                 if (!item.fromCache)
@@ -1163,23 +1082,16 @@ public class MainViewModel : ObservableObject
                 }
 
                 var source = await Helpers.ImageHelper.CreateSourceAsync(item.decoded);
-<<<<<<< HEAD
                 if (source != null && !ct.IsCancellationRequested)
-=======
-                if (source != null)
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
                 {
                     _gridCache.Put(item.path, source);
                     item.thumb.Image = source;
                 }
-<<<<<<< HEAD
                 else if (source != null)
                 {
                     // 已取消但 source 已创建 → 必须 ScheduleDispose 避免 GC finalizer 崩溃
                     ScheduleDispose(source);
                 }
-=======
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
             }
             catch
             {
@@ -1191,7 +1103,6 @@ public class MainViewModel : ObservableObject
         }
     }
 
-<<<<<<< HEAD
     /// <summary>释放网格缩略图占用的内存（SoftwareBitmapSource 必须在 UI 线程 Dispose）</summary>
     public void ClearGridThumbnails()
     {
@@ -1204,17 +1115,6 @@ public class MainViewModel : ObservableObject
         }
         GridThumbnails.Clear();
         _gridCache.Clear();
-=======
-    /// <summary>释放网格缩略图占用的内存</summary>
-    public void ClearGridThumbnails()
-    {
-        foreach (var thumb in GridThumbnails)
-            thumb.Image = null;
-        GridThumbnails.Clear();
-        _gridCache.Clear();
-        // 缩略图全部释放后触发 GC 回收解码缓冲
-        GC.Collect(2, GCCollectionMode.Optimized, blocking: false);
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
     }
 
     // ── 日志 ────────────────────────────────────────────────────────
@@ -1270,32 +1170,8 @@ public class MainViewModel : ObservableObject
 
     // ── UI 线程调度 ─────────────────────────────────────────────────
 
-<<<<<<< HEAD
     private void RunOnUI(Action action) => _safeDispatcher.Run(action);
     private void RunOnUI(Func<Task> asyncAction) => _safeDispatcher.RunAsync(asyncAction);
-=======
-    private void RunOnUI(Action action)
-    {
-        void safeAction()
-        {
-            try { action(); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[RunOnUI] {ex}"); }
-        }
-        if (_dispatcher.HasThreadAccess) safeAction();
-        else _dispatcher.TryEnqueue(safeAction);
-    }
-
-    private void RunOnUI(Func<Task> asyncAction)
-    {
-        async Task safeAction()
-        {
-            try { await asyncAction(); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[RunOnUI async] {ex}"); }
-        }
-        if (_dispatcher.HasThreadAccess) _ = safeAction();
-        else _dispatcher.TryEnqueue(() => _ = safeAction());
-    }
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
 
     private void RaiseCommands()
     {

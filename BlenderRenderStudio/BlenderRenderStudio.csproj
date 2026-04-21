@@ -3,11 +3,7 @@
 		<OutputType>WinExe</OutputType>
 		<TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
 		<TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
-<<<<<<< HEAD
 		<RootNamespace>BlenderRenderStudio</RootNamespace>
-=======
-		<RootNamespace>App1</RootNamespace>
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
 		<ApplicationManifest>app.manifest</ApplicationManifest>
 		<Platforms>x86;x64;ARM64</Platforms>
 		<RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
@@ -29,13 +25,8 @@
 	<PropertyGroup>
 		<PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
 		<PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
-<<<<<<< HEAD
 		<!-- PublishTrimmed 会裁剪 System.Text.Json 反射元数据，导致序列化静默失败 -->
 		<PublishTrimmed>False</PublishTrimmed>
-=======
-		<PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
-		<PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
->>>>>>> 24b10e2407b584065c0922a9cd8684aebb0d1adc
 		<DefaultLanguage>zh-CN</DefaultLanguage>
 	</PropertyGroup>
 </Project>
