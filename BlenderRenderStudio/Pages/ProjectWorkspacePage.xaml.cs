@@ -55,6 +55,11 @@ public sealed partial class ProjectWorkspacePage : Page
     // ── 网格视图列数 ────────────────────────────────────────────────
     private int _gridColumns = 4;
 
+    // ── 网格虚拟化滚动 ──────────────────────────────────────────────
+    private ScrollViewer? _gridScrollViewer;
+    private DispatcherTimer? _scrollDebounceTimer;
+    private bool _scrollDirty;
+
     /// <param name="existingViewModel">传入已有 ViewModel 时复用（保留渲染状态），null 则创建新实例</param>
     public ProjectWorkspacePage(RenderProject project, SafeDispatcher safeDispatcher, MainViewModel? existingViewModel = null)
     {
@@ -88,6 +93,10 @@ public sealed partial class ProjectWorkspacePage : Page
             BtnSingleView.IsChecked = false;
             BtnGridView.IsChecked = true;
         }
+
+        // 恢复全窗口预览状态
+        if (ViewModel.IsFullscreenPreview)
+            SetFullWindowMode(true);
 
         // 注入续渲对话框（每次新建页面都要重新绑定，因为需要当前页面的 XamlRoot）
         ViewModel.AskResumeAsync = AskResumeDialogAsync;
@@ -195,6 +204,15 @@ public sealed partial class ProjectWorkspacePage : Page
         {
             await RestoreExistingFramesAsync();
             System.Diagnostics.Trace.WriteLine($"[WORKSPACE] OnLoaded RestoreExistingFramesAsync 完成: hash={GetHashCode()}");
+
+            // 如果处于网格视图，加载可见范围内的缩略图
+            if (ViewModel.IsGridView && ViewModel.GridThumbnails.Count > 0)
+            {
+                int visibleCount = GetGridVisibleItemCount();
+                ViewModel._initialVisibleCount = visibleCount;
+                await ViewModel.LoadThumbnailRangeAsync(0, visibleCount - 1);
+                HookGridScrollViewer();
+            }
         }
         catch (Exception ex)
         {
@@ -212,7 +230,10 @@ public sealed partial class ProjectWorkspacePage : Page
         if (ViewModel.IsRendering && ViewModel.IsRenderingLocally)
         {
             System.Diagnostics.Trace.WriteLine($"[RestoreFrames] 渲染中重入，重建缩略图");
+            int visibleCount = GetGridVisibleItemCount();
+            ViewModel._initialVisibleCount = visibleCount;
             await ViewModel.RefreshGridThumbnailsAsync();
+            HookGridScrollViewer();
             var currentResult = ViewModel.FrameResults.LastOrDefault(f => f.Status == FrameStatus.Completed);
             if (currentResult != null && !string.IsNullOrEmpty(currentResult.OutputPath))
                 LoadPreviewForFrame(currentResult.FrameNumber);
@@ -320,12 +341,12 @@ public sealed partial class ProjectWorkspacePage : Page
 
     // ── 续渲对话框 ──────────────────────────────────────────────────
 
-    private async Task<string> AskResumeDialogAsync(int savedFrame)
+    private async Task<string> AskResumeDialogAsync(int lastCompletedFrame)
     {
         var dialog = new ContentDialog
         {
             Title = "检测到未完成渲染",
-            Content = $"上次渲染到第 {savedFrame} 帧，是否从此处继续？",
+            Content = $"已渲染到第 {lastCompletedFrame} 帧（共 {ViewModel.EndFrame - ViewModel.StartFrame + 1} 帧），是否从此处继续？",
             PrimaryButtonText = "续渲",
             SecondaryButtonText = "从头开始",
             CloseButtonText = "取消",
@@ -412,8 +433,34 @@ public sealed partial class ProjectWorkspacePage : Page
         BtnGridView.IsChecked = true;
         ViewModel.IsGridView = true;
 
-        // 首次切换到网格视图时加载缺失的缩略图
-        await ViewModel.LoadMissingThumbnailsAsync();
+        // 首次切换到网格视图时，仅加载当前可见范围的缩略图
+        int visibleCount = GetGridVisibleItemCount();
+        ViewModel._initialVisibleCount = visibleCount;
+        await ViewModel.LoadThumbnailRangeAsync(0, visibleCount - 1);
+
+        // 延迟挂载 ScrollViewer 事件（GridView 首次渲染后才有内部 ScrollViewer）
+        HookGridScrollViewer();
+    }
+
+    private void ToggleFullWindow_Click(object sender, RoutedEventArgs e)
+    {
+        SetFullWindowMode(!ViewModel.IsFullscreenPreview);
+    }
+
+    private void EscKey_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (ViewModel.IsFullscreenPreview)
+        {
+            SetFullWindowMode(false);
+            args.Handled = true;
+        }
+    }
+
+    private void SetFullWindowMode(bool fullWindow)
+    {
+        ViewModel.IsFullscreenPreview = fullWindow;
+        LeftColumnDef.Width = fullWindow ? new GridLength(0) : new GridLength(300);
+        FullWindowIcon.Glyph = fullWindow ? "\uE73F" : "\uE740";
     }
 
     private void GridThumbnail_Click(object sender, ItemClickEventArgs e)
@@ -445,6 +492,7 @@ public sealed partial class ProjectWorkspacePage : Page
     private void GridView_Loaded(object sender, RoutedEventArgs e)
     {
         UpdateGridItemSize();
+        HookGridScrollViewer();
     }
 
     private void GridView_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
@@ -464,9 +512,12 @@ public sealed partial class ProjectWorkspacePage : Page
     private void UpdateGridItemSize()
     {
         if (PreviewGridView.ActualWidth <= 0) return;
-        double availableWidth = PreviewGridView.ActualWidth - 16; // padding
-        double itemWidth = Math.Max(80, availableWidth / _gridColumns - 6);
-        double itemHeight = itemWidth / ViewModel.RenderAspectRatio + 24; // label height
+        double availableWidth = PreviewGridView.ActualWidth - 16; // GridView Padding="8" 左右共 16
+
+        // 精确填满容器：ItemWidth = Floor(可用宽度 / 列数)
+        // ItemsWrapGrid 以 ItemWidth 为槽宽，Border Margin="3" 在槽内部绘制，不额外占空间
+        double itemWidth = Math.Max(80, Math.Floor(availableWidth / _gridColumns));
+        double itemHeight = Math.Floor(itemWidth / ViewModel.RenderAspectRatio) + 24; // label height
 
         if (PreviewGridView.ItemsPanelRoot is ItemsWrapGrid wrapGrid)
         {
@@ -996,6 +1047,106 @@ public sealed partial class ProjectWorkspacePage : Page
         }
     }
 
+    // ── 网格虚拟化滚动 ──────────────────────────────────────────────
+
+    /// <summary>获取当前 GridView 可视区域能容纳的 item 数量</summary>
+    private int GetGridVisibleItemCount()
+    {
+        if (PreviewGridView.ActualWidth <= 0 || PreviewGridView.ActualHeight <= 0)
+            return 40; // 默认值
+
+        double availableWidth = PreviewGridView.ActualWidth - 16;
+        double itemWidth = Math.Max(80, Math.Floor(availableWidth / _gridColumns));
+        double itemHeight = Math.Floor(itemWidth / ViewModel.RenderAspectRatio) + 24;
+
+        int cols = _gridColumns;
+        int visibleRows = (int)Math.Ceiling(PreviewGridView.ActualHeight / itemHeight) + 1;
+        return cols * visibleRows;
+    }
+
+    /// <summary>挂载 GridView 内部 ScrollViewer 的 ViewChanged 事件</summary>
+    private void HookGridScrollViewer()
+    {
+        if (_gridScrollViewer != null) return;
+
+        _gridScrollViewer = FindChildOfType<ScrollViewer>(PreviewGridView);
+        if (_gridScrollViewer != null)
+        {
+            _gridScrollViewer.ViewChanged += GridScrollViewer_ViewChanged;
+            System.Diagnostics.Trace.WriteLine($"[WORKSPACE] GridView ScrollViewer 已挂载");
+        }
+    }
+
+    private void GridScrollViewer_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        // 滚动结束或中间帧都触发（防抖 150ms）
+        _scrollDirty = true;
+        if (_scrollDebounceTimer == null)
+        {
+            _scrollDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+            _scrollDebounceTimer.Tick += ScrollDebounce_Tick;
+            _scrollDebounceTimer.Start();
+        }
+    }
+
+    private async void ScrollDebounce_Tick(object? sender, object e)
+    {
+        if (!_scrollDirty) return;
+        _scrollDirty = false;
+
+        if (_gridScrollViewer == null || !ViewModel.IsGridView) return;
+
+        var (visibleStart, visibleEnd) = GetVisibleIndexRange();
+        int bufferItems = _gridColumns * 3; // BUFFER_ROWS=3 行缓冲
+
+        int loadStart = Math.Max(0, visibleStart - bufferItems);
+        int loadEnd = Math.Min(ViewModel.GridThumbnails.Count - 1, visibleEnd + bufferItems);
+
+        // 回收远离可视区域的 D2D 纹理
+        ViewModel.RecycleThumbnailsOutsideRange(loadStart, loadEnd);
+
+        // 加载新进入可视区域的缩略图
+        await ViewModel.LoadThumbnailRangeAsync(loadStart, loadEnd);
+    }
+
+    /// <summary>根据 ScrollViewer 偏移量计算当前可见的 GridView 项索引范围</summary>
+    private (int start, int end) GetVisibleIndexRange()
+    {
+        if (_gridScrollViewer == null || PreviewGridView.ActualWidth <= 0)
+            return (0, 39);
+
+        double availableWidth = PreviewGridView.ActualWidth - 16;
+        double itemWidth = Math.Max(80, Math.Floor(availableWidth / _gridColumns));
+        double itemHeight = Math.Floor(itemWidth / ViewModel.RenderAspectRatio) + 24;
+        if (itemHeight <= 0) itemHeight = 100;
+
+        int cols = _gridColumns;
+        double scrollOffset = _gridScrollViewer.VerticalOffset;
+        double viewportHeight = _gridScrollViewer.ViewportHeight;
+
+        int firstVisibleRow = (int)(scrollOffset / itemHeight);
+        int lastVisibleRow = (int)((scrollOffset + viewportHeight) / itemHeight);
+
+        int startIdx = firstVisibleRow * cols;
+        int endIdx = Math.Min((lastVisibleRow + 1) * cols - 1, ViewModel.GridThumbnails.Count - 1);
+
+        return (startIdx, endIdx);
+    }
+
+    /// <summary>在 VisualTree 中查找指定类型的子元素</summary>
+    private static T? FindChildOfType<T>(DependencyObject parent) where T : DependencyObject
+    {
+        int count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent);
+        for (int i = 0; i < count; i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(parent, i);
+            if (child is T found) return found;
+            var result = FindChildOfType<T>(child);
+            if (result != null) return result;
+        }
+        return null;
+    }
+
     // ── 清理 ────────────────────────────────────────────────────────
 
     /// <summary>
@@ -1013,6 +1164,14 @@ public sealed partial class ProjectWorkspacePage : Page
         _dragDebounceTimer?.Stop();
         _playbackTimer?.Stop();
         _timelineThrottleTimer?.Stop();
+        _scrollDebounceTimer?.Stop();
+
+        // 解除 ScrollViewer 事件
+        if (_gridScrollViewer != null)
+        {
+            _gridScrollViewer.ViewChanged -= GridScrollViewer_ViewChanged;
+            _gridScrollViewer = null;
+        }
 
         // 取消正在进行的缩略图批量加载（避免后续 CreateSourceAsync 写入已卸载的 UI）
         ViewModel.CancelThumbnailLoading();

@@ -475,7 +475,9 @@ public class RenderEngine
     {
         try
         {
-            var parts = text.Split(':').Select(double.Parse).ToArray();
+            var parts = text.Split(':')
+                .Select(s => double.Parse(s, System.Globalization.CultureInfo.InvariantCulture))
+                .ToArray();
             while (parts.Length < 3) parts = [0, .. parts];
             return parts[^3] * 3600 + parts[^2] * 60 + parts[^1];
         }

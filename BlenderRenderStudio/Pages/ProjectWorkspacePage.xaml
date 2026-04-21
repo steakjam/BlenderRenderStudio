@@ -20,15 +20,19 @@
         </TransitionCollection>
     </Page.Transitions>
 
-    <Grid>
+    <Grid x:Name="RootGrid">
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="Escape" Invoked="EscKey_Invoked" />
+        </Grid.KeyboardAccelerators>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="300" />
+            <ColumnDefinition x:Name="LeftColumnDef" Width="300" />
             <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
 
         <!-- ═══════ 左侧面板：项目参数 + 控制 ═══════ -->
-        <Border Grid.Column="0" BorderThickness="0,0,1,0"
-                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+        <Border x:Name="LeftPanel" Grid.Column="0" BorderThickness="0,0,1,0"
+                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                Visibility="{x:Bind ViewModel.IsNormalMode, Mode=OneWay}">
             <Grid RowSpacing="0">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="*" />
@@ -191,7 +195,7 @@
             </Grid.RowDefinitions>
 
             <!-- 状态区 -->
-            <StackPanel Spacing="6">
+            <StackPanel Spacing="6" Visibility="{x:Bind ViewModel.IsNormalMode, Mode=OneWay}">
                 <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
                            Style="{StaticResource BodyStrongTextBlockStyle}" />
                 <ProgressBar Value="{x:Bind ViewModel.OverallProgress, Mode=OneWay}" Maximum="100"
@@ -256,6 +260,13 @@
                                         <ComboBoxItem Content="200%" Tag="2.0" />
                                         <ComboBoxItem Content="原始" Tag="0" />
                                     </ComboBox>
+                                    <!-- 全窗口预览按钮 -->
+                                    <Button x:Name="BtnFullWindow" Click="ToggleFullWindow_Click"
+                                            Padding="6,4" FontSize="12" Margin="8,0,0,0"
+                                            ToolTipService.ToolTip="全窗口预览 (ESC 退出)"
+                                            VerticalAlignment="Center">
+                                        <FontIcon x:Name="FullWindowIcon" Glyph="&#xE740;" FontSize="14" />
+                                    </Button>
                                 </StackPanel>
                             </Grid>
                         </Border>
@@ -335,7 +346,8 @@
             <!-- 帧时间轴 -->
             <Border Grid.Row="2" CornerRadius="8" BorderThickness="1"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Padding="6,4">
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Padding="6,4"
+                    Visibility="{x:Bind ViewModel.IsNormalMode, Mode=OneWay}">
                 <Grid RowSpacing="0">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -375,7 +387,7 @@
             <Border Grid.Row="3" CornerRadius="8" BorderThickness="1"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" Padding="8"
-                    Visibility="{x:Bind ViewModel.ShowLogPanel, Mode=OneWay}" Height="180">
+                    Visibility="{x:Bind ViewModel.ShowLogPanelAndNormal, Mode=OneWay}" Height="180">
                 <Grid RowSpacing="4">
                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                     <Grid>

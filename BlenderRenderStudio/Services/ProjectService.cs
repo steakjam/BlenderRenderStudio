@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text.Json;
 using BlenderRenderStudio.Models;
@@ -154,6 +155,104 @@ public static class ProjectService
 
     /// <summary>清除内存缓存，强制下次从磁盘重新加载</summary>
     public static void InvalidateCache() => _cache = null;
+
+    /// <summary>
+    /// 导出项目为 .brsproj 归档（ZIP 格式）。
+    /// 包含 project.json + 可选的 progress.txt 和缩略图缓存。
+    /// </summary>
+    public static void Export(string projectId, string outputPath, bool includeProgress)
+    {
+        var project = GetById(projectId);
+        if (project == null) return;
+
+        if (File.Exists(outputPath)) File.Delete(outputPath);
+
+        using var zip = ZipFile.Open(outputPath, ZipArchiveMode.Create);
+
+        // 写入项目 JSON
+        var json = JsonSerializer.Serialize(project, _jsonOpts);
+        var entry = zip.CreateEntry("project.json");
+        using (var stream = entry.Open())
+        using (var writer = new StreamWriter(stream))
+            writer.Write(json);
+
+        if (includeProgress)
+        {
+            // 进度文件
+            if (File.Exists(project.ProgressFilePath))
+            {
+                zip.CreateEntryFromFile(project.ProgressFilePath, "cache/progress.txt");
+            }
+
+            // 缩略图缓存
+            if (Directory.Exists(project.ThumbnailCacheDir))
+            {
+                foreach (var file in Directory.GetFiles(project.ThumbnailCacheDir, "*.raw"))
+                {
+                    zip.CreateEntryFromFile(file, "cache/thumbnails/" + Path.GetFileName(file));
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 从 .brsproj 归档导入项目。
+    /// 返回导入后的项目对象；失败返回 null。
+    /// </summary>
+    public static RenderProject? Import(string archivePath)
+    {
+        if (!File.Exists(archivePath)) return null;
+
+        try
+        {
+            using var zip = ZipFile.OpenRead(archivePath);
+            var projectEntry = zip.GetEntry("project.json");
+            if (projectEntry == null) return null;
+
+            RenderProject? project;
+            using (var stream = projectEntry.Open())
+            using (var reader = new StreamReader(stream))
+            {
+                var json = reader.ReadToEnd();
+                project = JsonSerializer.Deserialize<RenderProject>(json, _jsonOpts);
+            }
+            if (project == null) return null;
+
+            // 分配新 ID 避免冲突
+            project.Id = Guid.NewGuid().ToString("N");
+            project.Status = ProjectStatus.Idle;
+
+            // 创建缓存目录
+            Directory.CreateDirectory(project.CacheDirectory);
+            Directory.CreateDirectory(project.ThumbnailCacheDir);
+
+            // 还原进度文件
+            var progressEntry = zip.GetEntry("cache/progress.txt");
+            if (progressEntry != null)
+            {
+                progressEntry.ExtractToFile(project.ProgressFilePath, overwrite: true);
+            }
+
+            // 还原缩略图缓存
+            foreach (var entry in zip.Entries)
+            {
+                if (!entry.FullName.StartsWith("cache/thumbnails/")) continue;
+                if (entry.Length == 0) continue;
+                var destPath = Path.Combine(project.ThumbnailCacheDir, entry.Name);
+                entry.ExtractToFile(destPath, overwrite: true);
+            }
+
+            // 添加到项目列表
+            var projects = LoadAll();
+            projects.Insert(0, project);
+            SaveAll();
+            return project;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     private static string GetDefaultOutputDir(string blendFilePath)
     {

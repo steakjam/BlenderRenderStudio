@@ -25,10 +25,10 @@
                         <TextBlock Text="新建项目" />
                     </StackPanel>
                 </Button>
-                <Button Click="ImportBlend_Click" ToolTipService.ToolTip="从 .blend 文件快速创建">
+                <Button Click="ImportProject_Click" ToolTipService.ToolTip="从 .brsproj 归档导入项目">
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <FontIcon Glyph="&#xE8E5;" FontSize="14" />
-                        <TextBlock Text="导入" />
+                        <TextBlock Text="导入项目" />
                     </StackPanel>
                 </Button>
             </StackPanel>
@@ -57,6 +57,14 @@
                     <Border CornerRadius="8" BorderThickness="1"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                        <Border.ContextFlyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="导出项目" Icon="SaveLocal"
+                                                Tag="{x:Bind Id}" Click="ExportProject_Click" />
+                                <MenuFlyoutItem Text="在文件管理器中打开" Icon="OpenLocal"
+                                                Tag="{x:Bind Id}" Click="OpenInExplorer_Click" />
+                            </MenuFlyout>
+                        </Border.ContextFlyout>
                         <Border.Transitions>
                             <TransitionCollection>
                                 <EntranceThemeTransition FromVerticalOffset="40" />
@@ -133,7 +141,7 @@
             <FontIcon Glyph="&#xE8F1;" FontSize="48" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
             <TextBlock Text="还没有项目" FontSize="16" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                        HorizontalAlignment="Center" />
-            <TextBlock Text="点击「新建项目」或「导入」开始" FontSize="13"
+            <TextBlock Text="点击「新建项目」或「导入项目」开始" FontSize="13"
                        Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
         </StackPanel>
     </Grid>

@@ -116,6 +116,8 @@ public class MainViewModel : ObservableObject
     private int _errorFrameCount;
     private int _autoPreviewVersion; // 防止 FrameSaved 的异步预览覆盖 FrameStarted 的清除
     private double _renderAspectRatio; // 渲染图像宽高比，首次加载后缓存
+    private long _lastFrameStartTicks; // wall-clock: 上一帧开始的 Stopwatch ticks
+    private bool _frameTimeFromBlender; // 本帧是否已从 Blender Time: 获取了帧时间
     private int _renderPixelWidth;     // 渲染图像原始宽度
     private int _renderPixelHeight;    // 渲染图像原始高度
     private ImageSource? _previewImage;
@@ -127,6 +129,18 @@ public class MainViewModel : ObservableObject
     // ── 内存管理（仿 Windows 资源管理器） ────────────────────────────
     // 网格缩略图 LRU 缓存：保留最近 200 张缩略图的解码数据
     private readonly ThumbnailCache _gridCache = new(200);
+
+    /// <summary>
+    /// 可视区域外保留的缓冲行数（上下各 BUFFER_ROWS 行不回收）。
+    /// 保证快速滚动时有预加载余量，同时限制总存活 D2D 纹理数。
+    /// </summary>
+    private const int BUFFER_ROWS = 3;
+
+    /// <summary>
+    /// 网格缩略图最大同时存活 D2D 纹理数量（动态检测）。
+    /// WARP / 所有 GPU 忙碌（占用率≥90%）→ 20；有空闲硬件 GPU → 120。
+    /// </summary>
+    private static readonly int MAX_ALIVE_GRID_SOURCES = Helpers.GpuDetector.GetMaxAliveGridSources();
     private string _statusText = "就绪";
 
     public bool IsRendering { get => _isRendering; set { SetProperty(ref _isRendering, value); OnPropertyChanged(nameof(IsNotRendering)); RaiseCommands(); } }
@@ -195,11 +209,21 @@ public class MainViewModel : ObservableObject
     public bool IsFullscreenPreview
     {
         get => _isFullscreenPreview;
-        set { if (SetProperty(ref _isFullscreenPreview, value)) OnPropertyChanged(nameof(IsNormalMode)); }
+        set
+        {
+            if (SetProperty(ref _isFullscreenPreview, value))
+            {
+                OnPropertyChanged(nameof(IsNormalMode));
+                OnPropertyChanged(nameof(ShowLogPanelAndNormal));
+            }
+        }
     }
 
     public bool IsSingleView => !IsGridView;
     public bool IsNormalMode => !IsFullscreenPreview;
+
+    /// <summary>日志面板仅在非全窗口模式且用户开启时可见</summary>
+    public bool ShowLogPanelAndNormal => ShowLogPanel && IsNormalMode;
 
     private bool _showLogPanel;
     private bool _isSettingsView;
@@ -208,7 +232,7 @@ public class MainViewModel : ObservableObject
     public bool ShowLogPanel
     {
         get => _showLogPanel;
-        set => SetProperty(ref _showLogPanel, value);
+        set { if (SetProperty(ref _showLogPanel, value)) OnPropertyChanged(nameof(ShowLogPanelAndNormal)); }
     }
 
     /// <summary>是否显示设置页面（页内导航）</summary>
@@ -257,6 +281,18 @@ public class MainViewModel : ObservableObject
         // 挂载引擎事件
         _engine.FrameStarted += frame => RunOnUI(() =>
         {
+            // Wall-clock 回退：如果上一帧没有收到 Blender 的 Time: 输出，
+            // 用 FrameStarted 之间的时间差作为帧渲染时间
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_lastFrameStartTicks > 0 && !_frameTimeFromBlender && CurrentFrame > 0 && frame != CurrentFrame)
+            {
+                double elapsed = (double)(now - _lastFrameStartTicks) / System.Diagnostics.Stopwatch.Frequency;
+                if (elapsed > 0.5 && elapsed < 36000) // 排除异常值（<0.5s 或 >10h）
+                    UpdateEstimatedRemaining(elapsed);
+            }
+            _lastFrameStartTicks = now;
+            _frameTimeFromBlender = false;
+
             // 视频模式：上一帧开始新帧时，标记前一帧为 Completed
             if (OutputType == RenderOutputType.Video && CurrentFrame > 0 && CurrentFrame != frame)
             {
@@ -364,6 +400,7 @@ public class MainViewModel : ObservableObject
         _engine.FrameTimeUpdate += seconds => RunOnUI(() =>
         {
             CurrentFrameTime = seconds;
+            _frameTimeFromBlender = true; // 标记本帧已从 Blender Time: 获取时间，wall-clock 不再覆盖
             UpdateEstimatedRemaining(seconds);
         });
 
@@ -441,11 +478,13 @@ public class MainViewModel : ObservableObject
             actualEndFrame = SingleFrameNumber;
         }
 
-        // 检测是否有上次中断的进度文件（仅图片序列模式）
+        // 检测是否有上次中断的进度（仅图片序列模式）
+        // 综合进度文件 + 磁盘扫描，取较大值（进度文件可能滞后于实际渲染）
         int actualResumeFrame = actualStartFrame;
         bool isResuming = false;
         if (OutputType == RenderOutputType.ImageSequence)
         {
+            int resumeFromFile = actualStartFrame;
             var progressFile = ProjectProgressFilePath ?? SettingsService.ProgressFilePath;
             if (File.Exists(progressFile))
             {
@@ -453,27 +492,52 @@ public class MainViewModel : ObservableObject
                 {
                     var text = File.ReadAllText(progressFile).Trim();
                     if (int.TryParse(text, out int savedFrame) && savedFrame > actualStartFrame && savedFrame <= actualEndFrame)
-                    {
-                        if (AskResumeAsync != null)
-                        {
-                            string choice = await AskResumeAsync(savedFrame);
-                            if (choice == "cancel") return;
-                            if (choice == "restart")
-                            {
-                                // 删除进度文件
-                                File.Delete(progressFile);
-                                // 清理输出目录下的旧渲染帧文件
-                                CleanOutputDirectory(OutputPattern, actualStartFrame, actualEndFrame);
-                            }
-                            else
-                            {
-                                actualResumeFrame = savedFrame;
-                                isResuming = true;
-                            }
-                        }
-                    }
+                        resumeFromFile = savedFrame;
                 }
                 catch { /* ignore */ }
+            }
+
+            // 磁盘扫描：从末尾向前找到第一个不存在的帧，即为实际续渲点
+            int resumeFromDisk = actualStartFrame;
+            if (!string.IsNullOrEmpty(OutputPattern))
+            {
+                // 从尾部向前扫描（大多数场景帧是连续渲染的，尾部扫描更快）
+                for (int i = actualEndFrame; i >= actualStartFrame; i--)
+                {
+                    if (RenderConfig.FindFrameFile(OutputPattern, i) != null)
+                    {
+                        resumeFromDisk = i + 1; // 下一帧是续渲起点
+                        break;
+                    }
+                }
+            }
+
+            // 取较大值：保证不重复渲染已存在的帧
+            int effectiveResume = Math.Max(resumeFromFile, resumeFromDisk);
+
+            if (effectiveResume > actualStartFrame && effectiveResume <= actualEndFrame)
+            {
+                if (AskResumeAsync != null)
+                {
+                    // 显示已完成帧数（effectiveResume - 1 是最后完成帧）
+                    string choice = await AskResumeAsync(effectiveResume - 1);
+                    if (choice == "cancel") return;
+                    if (choice == "restart")
+                    {
+                        // 删除进度文件
+                        if (File.Exists(progressFile)) File.Delete(progressFile);
+                        // 清理输出目录下的旧渲染帧文件
+                        CleanOutputDirectory(OutputPattern, actualStartFrame, actualEndFrame);
+                    }
+                    else
+                    {
+                        actualResumeFrame = effectiveResume;
+                        isResuming = true;
+                        // 同步更新进度文件（确保引擎也从正确位置续渲）
+                        try { File.WriteAllText(progressFile, effectiveResume.ToString()); }
+                        catch { /* ignore */ }
+                    }
+                }
             }
         }
 
@@ -491,6 +555,8 @@ public class MainViewModel : ObservableObject
         _frameTimes.Clear();
         _ewmaFrameTime = 0;
         _frameTimeSamples = 0;
+        _lastFrameStartTicks = 0;
+        _frameTimeFromBlender = false;
         _renderAspectRatio = 0;
         _renderPixelWidth = 0;
         _renderPixelHeight = 0;
@@ -950,8 +1016,8 @@ public class MainViewModel : ObservableObject
         });
         await Task.WhenAll(tasks);
 
-        // Step 2: UI 线程分批创建 SoftwareBitmapSource（每 8 张 yield 一次，防止 UI 卡顿）
-        int batchCount = 0;
+        // Step 2: 仅保存磁盘缓存，不创建 SoftwareBitmapSource
+        // source 创建由 Page 的虚拟化滚动（LoadThumbnailRangeAsync）按需触发
         foreach (var item in decodeResults)
         {
             if (ct.IsCancellationRequested)
@@ -971,44 +1037,42 @@ public class MainViewModel : ObservableObject
                         ImageHelper.SaveThumbnailCache(item.decoded, cachePath);
                     }
                 }
-
-                var source = await Helpers.ImageHelper.CreateSourceAsync(item.decoded);
-                if (source != null && !ct.IsCancellationRequested)
-                {
-                    _gridCache.Put(item.path, source);
-                    item.thumb.Image = source;
-                }
-                else if (source != null)
-                {
-                    ScheduleDispose(source);
-                }
+                item.decoded?.Dispose();
             }
             catch
             {
                 item.decoded?.Dispose();
             }
-
-            // 每 8 张让出 UI 线程，允许处理输入事件
-            if (++batchCount % 8 == 0)
-                await Task.Delay(1);
         }
+
+        // 触发初始可见范围加载（Page 后续通过 scroll 事件动态调整）
+        await LoadThumbnailRangeAsync(0, Math.Min(GridThumbnails.Count - 1, _initialVisibleCount - 1));
     }
 
+    /// <summary>由 Page 设置：当前网格可见的项数（用于 RefreshGrid 初始加载范围）</summary>
+    public int _initialVisibleCount = 40;
+
     /// <summary>
-    /// 仅加载缺失的网格缩略图（已有 Image 的不重新加载）。
-    /// 用于续渲后首次切换到网格视图——跳过帧的占位符有 OutputPath 但无 Image。
-    /// 不清空集合，不破坏已有缩略图。
+    /// 为指定索引范围内缺失 Image 的缩略图创建 SoftwareBitmapSource。
+    /// 虚拟化核心：仅加载可见区域 + 缓冲区，不一次性创建全部 D2D 纹理。
     /// </summary>
-    public async Task LoadMissingThumbnailsAsync()
+    /// <param name="startIdx">起始索引（含）</param>
+    /// <param name="endIdx">结束索引（含）</param>
+    public async Task LoadThumbnailRangeAsync(int startIdx, int endIdx)
     {
         // 取消上一次未完成的加载
         _thumbnailCts?.Cancel();
         _thumbnailCts = new CancellationTokenSource();
         var ct = _thumbnailCts.Token;
 
+        startIdx = Math.Max(0, startIdx);
+        endIdx = Math.Min(endIdx, GridThumbnails.Count - 1);
+        if (startIdx > endIdx) return;
+
         var thumbsToLoad = new List<(FrameThumbnail thumb, string path)>();
-        foreach (var thumb in GridThumbnails)
+        for (int i = startIdx; i <= endIdx; i++)
         {
+            var thumb = GridThumbnails[i];
             if (thumb.Image != null || string.IsNullOrEmpty(thumb.OutputPath)) continue;
             var path = thumb.OutputPath.Replace('/', '\\');
             var cached = _gridCache.Get(path);
@@ -1024,10 +1088,12 @@ public class MainViewModel : ObservableObject
 
         if (thumbsToLoad.Count == 0) return;
 
-        // 后台并行加载（优先磁盘缓存）
+        System.Diagnostics.Trace.WriteLine($"[VM] LoadRange [{startIdx}..{endIdx}]: {thumbsToLoad.Count} 待创建");
+
+        // 后台并行解码（优先磁盘缓存）
         var cacheDir = SettingsService.ThumbnailCacheDir;
         var decodeResults = new List<(FrameThumbnail thumb, string path, DecodedImage decoded, bool fromCache)>();
-        int maxConcurrent = Math.Min(Environment.ProcessorCount, 16);
+        int maxConcurrent = Math.Min(Environment.ProcessorCount, 8);
         var semaphore = new SemaphoreSlim(maxConcurrent);
         var tasks = thumbsToLoad.Select(async item =>
         {
@@ -1058,11 +1124,10 @@ public class MainViewModel : ObservableObject
         });
         await Task.WhenAll(tasks);
 
-        // UI 线程分批创建 SoftwareBitmapSource（每 8 张 yield 一次，防止 UI 卡顿）
-        int batchCount = 0;
+        // UI 线程逐个创建 SoftwareBitmapSource（强制 WARP 纹理上限）
+        int createdCount = 0;
         foreach (var item in decodeResults)
         {
-            // 视图已切走或页面已卸载 → 释放已解码数据，停止创建 D2D surface
             if (ct.IsCancellationRequested)
             {
                 item.decoded?.Dispose();
@@ -1081,15 +1146,23 @@ public class MainViewModel : ObservableObject
                     }
                 }
 
+                // WARP 设备并发纹理限制：创建前先确保存活数不超标
+                int aliveCount = CountAliveGridSources();
+                if (aliveCount >= MAX_ALIVE_GRID_SOURCES)
+                {
+                    // 回收距离当前加载范围最远的 source
+                    RecycleFarthestSources(startIdx, endIdx, aliveCount - MAX_ALIVE_GRID_SOURCES + 1);
+                }
+
                 var source = await Helpers.ImageHelper.CreateSourceAsync(item.decoded);
                 if (source != null && !ct.IsCancellationRequested)
                 {
                     _gridCache.Put(item.path, source);
                     item.thumb.Image = source;
+                    createdCount++;
                 }
                 else if (source != null)
                 {
-                    // 已取消但 source 已创建 → 必须 ScheduleDispose 避免 GC finalizer 崩溃
                     ScheduleDispose(source);
                 }
             }
@@ -1098,9 +1171,115 @@ public class MainViewModel : ObservableObject
                 item.decoded?.Dispose();
             }
 
-            if (++batchCount % 8 == 0)
-                await Task.Delay(1);
+            // 每 4 张让出 UI 线程
+            if (createdCount % 4 == 0)
+                await Task.Delay(16);
         }
+    }
+
+    /// <summary>
+    /// 回收可视区域之外的缩略图 D2D 纹理（ScheduleDispose + 设 Image=null）。
+    /// 保留 keepStart..keepEnd 范围内的 source 不回收。
+    /// </summary>
+    public void RecycleThumbnailsOutsideRange(int keepStart, int keepEnd)
+    {
+        keepStart = Math.Max(0, keepStart);
+        keepEnd = Math.Min(keepEnd, GridThumbnails.Count - 1);
+
+        int recycled = 0;
+        for (int i = 0; i < GridThumbnails.Count; i++)
+        {
+            if (i >= keepStart && i <= keepEnd) continue;
+            var thumb = GridThumbnails[i];
+            if (thumb.Image == null) continue;
+
+            var cacheKey = thumb.OutputPath?.Replace('/', '\\');
+            if (!string.IsNullOrEmpty(cacheKey)) _gridCache.Remove(cacheKey);
+            ScheduleDispose(thumb.Image);
+            thumb.Image = null;
+            recycled++;
+        }
+
+        if (recycled > 0)
+        {
+            FlushPendingDispose(forceAll: true);
+            System.Diagnostics.Trace.WriteLine($"[VM] RecycleThumbs: 回收 {recycled} 个 (保留 [{keepStart}..{keepEnd}])");
+        }
+    }
+
+    private int CountAliveGridSources()
+    {
+        int count = 0;
+        for (int i = 0; i < GridThumbnails.Count; i++)
+            if (GridThumbnails[i].Image != null) count++;
+        return count;
+    }
+
+    private void RecycleFarthestSources(int rangeStart, int rangeEnd, int recycleCount)
+    {
+        if (recycleCount <= 0) return;
+        int rangeMid = (rangeStart + rangeEnd) / 2;
+
+        // 收集所有有 Image 且在目标范围之外的索引，按距离降序排列
+        var candidates = new List<(int idx, int dist)>();
+        for (int i = 0; i < GridThumbnails.Count; i++)
+        {
+            if (GridThumbnails[i].Image == null) continue;
+            if (i >= rangeStart && i <= rangeEnd) continue;
+            int dist = Math.Abs(i - rangeMid);
+            candidates.Add((i, dist));
+        }
+        candidates.Sort((a, b) => b.dist.CompareTo(a.dist));
+
+        int recycled = 0;
+        foreach (var (idx, _) in candidates)
+        {
+            if (recycled >= recycleCount) break;
+            var thumb = GridThumbnails[idx];
+            if (thumb.Image == null) continue;
+            var cacheKey = thumb.OutputPath?.Replace('/', '\\');
+            if (!string.IsNullOrEmpty(cacheKey)) _gridCache.Remove(cacheKey);
+            ScheduleDispose(thumb.Image);
+            thumb.Image = null;
+            recycled++;
+        }
+
+        // 范围外不够回收时，从范围两端向内回收
+        if (recycled < recycleCount)
+        {
+            for (int d = 0; d < GridThumbnails.Count && recycled < recycleCount; d++)
+            {
+                foreach (int i in new[] { rangeStart - 1 - d, rangeEnd + 1 + d })
+                {
+                    if (i < 0 || i >= GridThumbnails.Count) continue;
+                    var thumb = GridThumbnails[i];
+                    if (thumb.Image == null) continue;
+                    var ck = thumb.OutputPath?.Replace('/', '\\');
+                    if (!string.IsNullOrEmpty(ck)) _gridCache.Remove(ck);
+                    ScheduleDispose(thumb.Image);
+                    thumb.Image = null;
+                    recycled++;
+                    if (recycled >= recycleCount) break;
+                }
+            }
+        }
+
+        if (recycled > 0)
+        {
+            // WARP 设备必须立即释放纹理槽位，否则新 CreateSourceAsync 仍会撞上限
+            FlushPendingDispose(forceAll: true);
+            System.Diagnostics.Trace.WriteLine($"[VM] RecycleFarthest: 回收 {recycled} 个纹理 (为加载 [{rangeStart}..{rangeEnd}] 腾出空间)");
+        }
+    }
+
+    /// <summary>
+    /// 兼容旧调用：加载初始可见范围的缩略图。
+    /// Page 应优先直接调用 LoadThumbnailRangeAsync 并传入精确范围。
+    /// </summary>
+    public Task LoadMissingThumbnailsAsync()
+    {
+        int count = Math.Min(GridThumbnails.Count, _initialVisibleCount);
+        return LoadThumbnailRangeAsync(0, count - 1);
     }
 
     /// <summary>释放网格缩略图占用的内存（SoftwareBitmapSource 必须在 UI 线程 Dispose）</summary>

@@ -76,13 +76,13 @@ public sealed partial class ProjectListPage : Page
         catch { }
     }
 
-    private async void ImportBlend_Click(object sender, RoutedEventArgs e)
+    private async void ImportProject_Click(object sender, RoutedEventArgs e)
     {
         try
         {
             var picker = new FileOpenPicker();
             picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
-            picker.FileTypeFilter.Add(".blend");
+            picker.FileTypeFilter.Add(".brsproj");
 
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.CurrentWindow);
             WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
@@ -90,13 +90,82 @@ public sealed partial class ProjectListPage : Page
             var file = await picker.PickSingleFileAsync();
             if (file != null)
             {
-                var name = Path.GetFileNameWithoutExtension(file.Path);
-                var project = ProjectService.Create(name, file.Path);
-                RefreshProjects();
-                NavigateToProject?.Invoke(project);
+                var project = ProjectService.Import(file.Path);
+                if (project != null)
+                {
+                    RefreshProjects();
+                    NavigateToProject?.Invoke(project);
+                }
+                else
+                {
+                    await new ContentDialog
+                    {
+                        Title = "导入失败",
+                        Content = "文件格式无效或已损坏。",
+                        CloseButtonText = "确定",
+                        XamlRoot = this.XamlRoot,
+                    }.ShowAsync();
+                }
             }
         }
         catch { }
+    }
+
+    private async void ExportProject_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement fe || fe.Tag is not string id) return;
+        var project = ProjectService.GetById(id);
+        if (project == null) return;
+
+        try
+        {
+            // 询问是否包含渲染进度
+            var includeProgress = false;
+            var dialog = new ContentDialog
+            {
+                Title = "导出项目",
+                Content = new CheckBox { Content = "包含渲染进度和缩略图缓存", IsChecked = false },
+                PrimaryButtonText = "导出",
+                CloseButtonText = "取消",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = this.XamlRoot,
+            };
+            var result = await dialog.ShowAsync();
+            if (result != ContentDialogResult.Primary) return;
+
+            if (dialog.Content is CheckBox cb)
+                includeProgress = cb.IsChecked == true;
+
+            // 选择保存位置
+            var picker = new FileSavePicker();
+            picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+            picker.FileTypeChoices.Add("BlenderRenderStudio 项目", [".brsproj"]);
+            picker.SuggestedFileName = project.Name;
+
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.CurrentWindow);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+            var file = await picker.PickSaveFileAsync();
+            if (file != null)
+            {
+                ProjectService.Export(id, file.Path, includeProgress);
+            }
+        }
+        catch { }
+    }
+
+    private void OpenInExplorer_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement fe || fe.Tag is not string id) return;
+        var project = ProjectService.GetById(id);
+        if (project == null) return;
+
+        var dir = !string.IsNullOrEmpty(project.OutputDirectory) && Directory.Exists(project.OutputDirectory)
+            ? project.OutputDirectory
+            : project.CacheDirectory;
+
+        if (Directory.Exists(dir))
+            System.Diagnostics.Process.Start("explorer.exe", dir);
     }
 
     private void ProjectCard_Click(object sender, ItemClickEventArgs e)

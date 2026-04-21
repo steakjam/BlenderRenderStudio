@@ -70,6 +70,20 @@ public sealed class ThumbnailCache
         }
     }
 
+    /// <summary>移除指定 key 的缓存条目</summary>
+    public void Remove(string key)
+    {
+        lock (_lock)
+        {
+            if (_map.TryGetValue(key, out var node))
+            {
+                _lruList.Remove(node);
+                _map.Remove(key);
+                node.Value.Source = null;
+            }
+        }
+    }
+
     /// <summary>清空缓存（仅解除引用，不 Dispose）</summary>
     public void Clear()
     {
