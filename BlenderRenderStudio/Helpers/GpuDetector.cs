@@ -22,8 +22,10 @@ internal static class GpuDetector
     /// </summary>
     public static int GetMaxAliveGridSources()
     {
+        // WinUI 3 的 SoftwareBitmapSource 使用 composition 层 D2D 设备（WARP），
+        // 与用户 GPU 无关。实测硬件 GPU 机器上 ~32 个 source 就会触发 0xC000027B。
         const int WARP_LIMIT = 20;
-        const int HW_LIMIT = 120;
+        const int HW_LIMIT = 30;
         const double BUSY_THRESHOLD = 0.90; // 占用率超过 90% 视为不可用
 
         try

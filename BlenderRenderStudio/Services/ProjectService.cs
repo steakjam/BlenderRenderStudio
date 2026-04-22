@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Text.Json;
+using BlenderRenderStudio.Helpers;
 using BlenderRenderStudio.Models;
 
 namespace BlenderRenderStudio.Services;
@@ -157,10 +158,11 @@ public static class ProjectService
     public static void InvalidateCache() => _cache = null;
 
     /// <summary>
-    /// 导出项目为 .brsproj 归档（ZIP 格式）。
-    /// 包含 project.json + 可选的 progress.txt 和缩略图缓存。
+    /// 导出项目为 .brsproj 自包含归档（ZIP 格式）。
+    /// 归档结构：project.json / blend/{name}.blend / frames/{file} / cache/progress.txt / cache/thumbnails/*.raw
+    /// 所有文件仅保留文件名，不保留原始绝对路径。
     /// </summary>
-    public static void Export(string projectId, string outputPath, bool includeProgress)
+    public static void Export(string projectId, string outputPath)
     {
         var project = GetById(projectId);
         if (project == null) return;
@@ -169,37 +171,91 @@ public static class ProjectService
 
         using var zip = ZipFile.Open(outputPath, ZipArchiveMode.Create);
 
-        // 写入项目 JSON
+        // 1. 项目配置 JSON
         var json = JsonSerializer.Serialize(project, _jsonOpts);
         var entry = zip.CreateEntry("project.json");
         using (var stream = entry.Open())
         using (var writer = new StreamWriter(stream))
             writer.Write(json);
 
-        if (includeProgress)
+        // 2. .blend 工程文件
+        if (!string.IsNullOrEmpty(project.BlendFilePath) && File.Exists(project.BlendFilePath))
         {
-            // 进度文件
-            if (File.Exists(project.ProgressFilePath))
-            {
-                zip.CreateEntryFromFile(project.ProgressFilePath, "cache/progress.txt");
-            }
+            zip.CreateEntryFromFile(project.BlendFilePath, "blend/" + Path.GetFileName(project.BlendFilePath));
+        }
 
-            // 缩略图缓存
-            if (Directory.Exists(project.ThumbnailCacheDir))
+        // 3. 渲染输出帧（仅保留文件名）
+        if (!string.IsNullOrEmpty(project.OutputPattern))
+        {
+            int start = project.OutputType == 2 ? project.SingleFrameNumber : project.StartFrame;
+            int end = project.OutputType == 2 ? project.SingleFrameNumber : project.EndFrame;
+            var pattern = project.OutputPattern;
+            var globalCacheDir = SettingsService.ThumbnailCacheDir;
+            var hasCacheDir = Directory.Exists(globalCacheDir);
+
+            for (int frame = start; frame <= end; frame++)
             {
-                foreach (var file in Directory.GetFiles(project.ThumbnailCacheDir, "*.raw"))
+                var framePath = Models.RenderConfig.FindFrameFile(pattern, frame);
+                if (framePath == null) continue;
+
+                // 帧图片
+                zip.CreateEntryFromFile(framePath, "frames/" + Path.GetFileName(framePath));
+
+                // 4. 对应的缩略图缓存
+                if (hasCacheDir)
                 {
-                    zip.CreateEntryFromFile(file, "cache/thumbnails/" + Path.GetFileName(file));
+                    var cacheKey = ImageHelper.GetCacheKey(framePath);
+                    if (!string.IsNullOrEmpty(cacheKey))
+                    {
+                        var rawPath = ImageHelper.GetCachePath(globalCacheDir, cacheKey);
+                        if (File.Exists(rawPath))
+                            zip.CreateEntryFromFile(rawPath, "cache/thumbnails/" + cacheKey + ".raw");
+                    }
                 }
             }
+        }
+
+        // 5. 渲染进度
+        if (File.Exists(project.ProgressFilePath))
+        {
+            zip.CreateEntryFromFile(project.ProgressFilePath, "cache/progress.txt");
         }
     }
 
     /// <summary>
-    /// 从 .brsproj 归档导入项目。
-    /// 返回导入后的项目对象；失败返回 null。
+    /// 预读归档中的项目信息（不执行导入），用于导入配置界面展示。
+    /// 返回 (项目对象, .blend 文件名, 帧文件数量)。
     /// </summary>
-    public static RenderProject? Import(string archivePath)
+    public static (RenderProject? Project, string? BlendFileName, int FrameCount) PreviewImport(string archivePath)
+    {
+        if (!File.Exists(archivePath)) return (null, null, 0);
+        try
+        {
+            using var zip = ZipFile.OpenRead(archivePath);
+            var projectEntry = zip.GetEntry("project.json");
+            if (projectEntry == null) return (null, null, 0);
+
+            RenderProject? project;
+            using (var stream = projectEntry.Open())
+            using (var reader = new StreamReader(stream))
+                project = JsonSerializer.Deserialize<RenderProject>(reader.ReadToEnd(), _jsonOpts);
+
+            var blendEntry = zip.Entries.FirstOrDefault(e => e.FullName.StartsWith("blend/") && e.Length > 0);
+            var blendName = blendEntry?.Name;
+            var frameCount = zip.Entries.Count(e => e.FullName.StartsWith("frames/") && e.Length > 0);
+
+            return (project, blendName, frameCount);
+        }
+        catch { return (null, null, 0); }
+    }
+
+    /// <summary>
+    /// 从 .brsproj 归档导入项目。
+    /// blendDir: .blend 文件提取目标目录。
+    /// outputDir: 渲染帧提取目标目录。
+    /// blenderPath: 本机 Blender 可执行文件路径。
+    /// </summary>
+    public static RenderProject? Import(string archivePath, string blendDir, string outputDir, string blenderPath)
     {
         if (!File.Exists(archivePath)) return null;
 
@@ -212,37 +268,63 @@ public static class ProjectService
             RenderProject? project;
             using (var stream = projectEntry.Open())
             using (var reader = new StreamReader(stream))
-            {
-                var json = reader.ReadToEnd();
-                project = JsonSerializer.Deserialize<RenderProject>(json, _jsonOpts);
-            }
+                project = JsonSerializer.Deserialize<RenderProject>(reader.ReadToEnd(), _jsonOpts);
             if (project == null) return null;
 
-            // 分配新 ID 避免冲突
+            // 分配新 ID
             project.Id = Guid.NewGuid().ToString("N");
             project.Status = ProjectStatus.Idle;
+            project.BlenderPath = blenderPath;
+            project.OutputDirectory = outputDir;
 
-            // 创建缓存目录
+            // 1. 提取 .blend 文件
+            Directory.CreateDirectory(blendDir);
+            var blendEntry = zip.Entries.FirstOrDefault(e => e.FullName.StartsWith("blend/") && e.Length > 0);
+            if (blendEntry != null)
+            {
+                var blendDest = Path.Combine(blendDir, blendEntry.Name);
+                blendEntry.ExtractToFile(blendDest, overwrite: true);
+                project.BlendFilePath = blendDest;
+            }
+
+            // 2. 提取渲染帧
+            Directory.CreateDirectory(outputDir);
+            int frameCount = 0;
+            foreach (var fe in zip.Entries)
+            {
+                if (!fe.FullName.StartsWith("frames/") || fe.Length == 0) continue;
+                fe.ExtractToFile(Path.Combine(outputDir, fe.Name), overwrite: true);
+                frameCount++;
+            }
+            // 有帧文件时保留原进度，否则清零
+            if (frameCount > 0)
+            {
+                // CompletedFrames 保留归档中的值
+            }
+            else
+            {
+                project.CompletedFrames = 0;
+                project.LastRenderedFrame = 0;
+            }
+
+            // 3. 创建缓存目录 + 还原进度文件
             Directory.CreateDirectory(project.CacheDirectory);
-            Directory.CreateDirectory(project.ThumbnailCacheDir);
-
-            // 还原进度文件
             var progressEntry = zip.GetEntry("cache/progress.txt");
             if (progressEntry != null)
-            {
                 progressEntry.ExtractToFile(project.ProgressFilePath, overwrite: true);
-            }
 
-            // 还原缩略图缓存
-            foreach (var entry in zip.Entries)
+            // 4. 还原缩略图到全局 thumbcache
+            var globalCacheDir = SettingsService.ThumbnailCacheDir;
+            Directory.CreateDirectory(globalCacheDir);
+            foreach (var ce in zip.Entries)
             {
-                if (!entry.FullName.StartsWith("cache/thumbnails/")) continue;
-                if (entry.Length == 0) continue;
-                var destPath = Path.Combine(project.ThumbnailCacheDir, entry.Name);
-                entry.ExtractToFile(destPath, overwrite: true);
+                if (!ce.FullName.StartsWith("cache/thumbnails/") || ce.Length == 0) continue;
+                var dest = Path.Combine(globalCacheDir, ce.Name);
+                if (!File.Exists(dest))
+                    ce.ExtractToFile(dest);
             }
 
-            // 添加到项目列表
+            // 5. 添加到项目列表
             var projects = LoadAll();
             projects.Insert(0, project);
             SaveAll();

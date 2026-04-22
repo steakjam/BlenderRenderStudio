@@ -16,6 +16,7 @@ public sealed partial class MainWindow : Window
 {
     private readonly RenderQueueService _queueService = new();
     private readonly RenderRecovery _renderRecovery = new();
+    private readonly NetworkDiscoveryService _networkService = new();
 
     /// <summary>全局安全调度器，窗口关闭后所有 UI 调度静默忽略</summary>
     public SafeDispatcher Dispatcher { get; private set; } = null!;
@@ -44,6 +45,9 @@ public sealed partial class MainWindow : Window
             Dispatcher.Run(() => OpenProject(project));
         };
 
+        // 启动网络服务（根据设置决定 Master/Worker 模式）
+        InitNetworkService();
+
         this.Closed += (_, _) =>
         {
             // 1. 先标记 SafeDispatcher 为已关闭，阻止后续所有 UI 调度
@@ -51,6 +55,7 @@ public sealed partial class MainWindow : Window
 
             // 2. 停止后台服务
             _queueService.Stop();
+            _networkService.Stop();
             _renderRecovery.StopMonitoring();
 
             // 3. 关闭工作区 ViewModel（停止渲染引擎 + 保存设置）
@@ -67,6 +72,19 @@ public sealed partial class MainWindow : Window
 
         // 初始导航到项目列表
         NavigateToProjects();
+    }
+
+    private void InitNetworkService()
+    {
+        var settings = SettingsService.Load();
+        var port = settings.NetworkPort;
+
+        // 总是以 Master 模式启动（监听设备注册 + UDP 发现）
+        _networkService.StartMaster(port, settings.RemoteDevices);
+
+        // 如果同时启用了 Worker 模式，也广播自身
+        if (settings.EnableRemoteWorker)
+            _networkService.StartWorker(settings.DeviceName, port);
     }
 
     // ── 导航逻辑 ────────────────────────────────────────────────
@@ -86,6 +104,9 @@ public sealed partial class MainWindow : Window
                     break;
                 case "queue":
                     NavigateToQueue();
+                    break;
+                case "devices":
+                    NavigateToDevices();
                     break;
                 case "settings":
                     NavigateToSettings();
@@ -175,6 +196,14 @@ public sealed partial class MainWindow : Window
         page.NavigateToProject = project => OpenProject(project);
         SetContent(page);
         Trace.WriteLine($"[NAV] NavigateToQueue 完成");
+    }
+
+    private void NavigateToDevices()
+    {
+        Trace.WriteLine($"[NAV] NavigateToDevices 开始");
+        var page = new DeviceManagementPage();
+        page.SetNetworkService(_networkService);
+        SetContent(page);
     }
 
     private void NavigateToSettings()

@@ -11,7 +11,6 @@ using BlenderRenderStudio.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-
 namespace BlenderRenderStudio.ViewModels;
 
 public class MainViewModel : ObservableObject
@@ -19,7 +18,7 @@ public class MainViewModel : ObservableObject
     private readonly RenderEngine _engine = new();
     private readonly SafeDispatcher _safeDispatcher;
     private CancellationTokenSource? _cts;
-    private CancellationTokenSource? _thumbnailCts; // 缩略图批量加载取消令牌
+    private CancellationTokenSource? _thumbnailCts; // 缩略图加载取消令牌（预览用）
     private bool _isStopping; // 用户主动停止标记，防止 RenderCompleted 覆盖进度
 
     // ── 配置属性 ────────────────────────────────────────────────────
@@ -126,21 +125,11 @@ public class MainViewModel : ObservableObject
     private bool _isBulkInserting;        // 批量插入帧列表中，抑制 CollectionChanged
     private string? _pendingPreviewPath;  // 最新待加载路径（合并快速连续请求）
 
-    // ── 内存管理（仿 Windows 资源管理器） ────────────────────────────
-    // 网格缩略图 LRU 缓存：保留最近 200 张缩略图的解码数据
-    private readonly ThumbnailCache _gridCache = new(200);
-
     /// <summary>
     /// 可视区域外保留的缓冲行数（上下各 BUFFER_ROWS 行不回收）。
-    /// 保证快速滚动时有预加载余量，同时限制总存活 D2D 纹理数。
     /// </summary>
     private const int BUFFER_ROWS = 3;
 
-    /// <summary>
-    /// 网格缩略图最大同时存活 D2D 纹理数量（动态检测）。
-    /// WARP / 所有 GPU 忙碌（占用率≥90%）→ 20；有空闲硬件 GPU → 120。
-    /// </summary>
-    private static readonly int MAX_ALIVE_GRID_SOURCES = Helpers.GpuDetector.GetMaxAliveGridSources();
     private string _statusText = "就绪";
 
     public bool IsRendering { get => _isRendering; set { SetProperty(ref _isRendering, value); OnPropertyChanged(nameof(IsNotRendering)); RaiseCommands(); } }
@@ -377,8 +366,8 @@ public class MainViewModel : ObservableObject
                         if (previewSource != null && version == _autoPreviewVersion)
                             PreviewImage = previewSource;
 
-                        // 网格缩略图（从缓存或预览同源，不再重新解码）
-                        await UpdateGridThumbnailAsync(frame, normalizedPath);
+                        // 网格缩略图（BitmapImage+URI，无需解码/D2D管理）
+                        UpdateGridThumbnail(frame, normalizedPath);
                     }
                 }
                 catch { /* ignore */ }
@@ -585,13 +574,16 @@ public class MainViewModel : ObservableObject
             }
             FrameResults.Add(fr);
 
-            // 网格占位符（FrameSaved 时填充图片）
-            GridThumbnails.Add(new FrameThumbnail
+            // 网格占位符（FrameSaved 时填充图片），预计算 CacheKey
+            var thumbItem = new FrameThumbnail
             {
                 FrameNumber = fr.FrameNumber,
                 OutputPath = fr.OutputPath,
                 Status = fr.Status,
-            });
+            };
+            if (!string.IsNullOrEmpty(fr.OutputPath))
+                thumbItem.CacheKey = ImageHelper.GetCacheKey(fr.OutputPath.Replace('/', '\\'));
+            GridThumbnails.Add(thumbItem);
         }
         CompletedFrames = alreadyDone;
         IsBulkInserting = false;
@@ -894,67 +886,29 @@ public class MainViewModel : ObservableObject
     /// FrameSaved 时实时更新对应帧的网格缩略图。
     /// 找到已有占位符并加载图片，无论当前是否在网格视图（保证切换时已就绪）。
     /// </summary>
-    private async Task UpdateGridThumbnailAsync(int frameNumber, string path)
+    private void UpdateGridThumbnail(int frameNumber, string path)
     {
         var thumb = GridThumbnails.FirstOrDefault(t => t.FrameNumber == frameNumber);
         if (thumb == null) return;
 
         path = path.Replace('/', '\\');
-        if (!File.Exists(path)) return;
-
-        try
+        // BitmapImage+URI：XAML 内部管理 D2D 纹理池，无数量限制
+        var bi = new BitmapImage
         {
-            var decoded = await ImageHelper.DecodeAsync(path, decodePixelWidth: 240);
-            if (decoded == null) return;
-
-            // 同步写入磁盘缓存（130KB，耗时可忽略，必须在 CreateSourceAsync Dispose 之前）
-            var cacheKey = ImageHelper.GetCacheKey(path);
-            if (!string.IsNullOrEmpty(cacheKey))
-            {
-                var cachePath = ImageHelper.GetCachePath(SettingsService.ThumbnailCacheDir, cacheKey);
-                ImageHelper.SaveThumbnailCache(decoded, cachePath);
-            }
-
-            var source = await ImageHelper.CreateSourceAsync(decoded);
-            if (source != null)
-            {
-                // ScheduleDispose 旧 source，防止 GC finalizer 在错误线程释放 D2D 纹理
-                if (thumb.Image != null && thumb.Image != source)
-                    ScheduleDispose(thumb.Image);
-                _gridCache.Put(path, source);
-                thumb.Image = source;
-            }
-        }
-        catch { /* ignore */ }
+            DecodePixelWidth = 240,
+            UriSource = new Uri(path)
+        };
+        thumb.Image = bi;
     }
 
     /// <summary>
     /// 根据当前 FrameResults 刷新网格缩略图集合。
-    /// 内存策略（仿 Windows 资源管理器）：
-    /// - LRU 缓存命中的缩略图直接复用，不重新解码
-    /// - 新加载的缩略图进入 LRU 缓存，超出容量时自动淘汰最旧条目
-    /// - 后台并行解码 + UI 线程顺序创建 Source（避免 async void 崩溃）
+    /// 使用 BitmapImage+URI：XAML 内部管理纹理池，支持上千张图片同框。
     /// </summary>
-    public async Task RefreshGridThumbnailsAsync()
+    public void RefreshGridThumbnails()
     {
-        // 取消上一次未完成的加载
-        _thumbnailCts?.Cancel();
-        _thumbnailCts = new CancellationTokenSource();
-        var ct = _thumbnailCts.Token;
-
-        foreach (var old in GridThumbnails)
-        {
-            ScheduleDispose(old.Image);
-            old.Image = null;
-        }
         GridThumbnails.Clear();
-        // 必须同步清空缓存：ScheduleDispose 的 source 仍在 _gridCache 中，
-        // 如果后续 _gridCache.Get 命中则会将已排队释放的 source 重新绑定到新 UI
-        // → FlushPendingDispose 执行 Dispose 时 XAML 渲染线程仍在使用 → 0xC000027B
-        _gridCache.Clear();
 
-        var thumbsToLoad = new List<(FrameThumbnail thumb, string path)>();
-        var cacheDir = SettingsService.ThumbnailCacheDir;
         foreach (var fr in FrameResults)
         {
             var thumb = new FrameThumbnail
@@ -963,337 +917,71 @@ public class MainViewModel : ObservableObject
                 OutputPath = fr.OutputPath,
                 Status = fr.Status,
             };
-            GridThumbnails.Add(thumb);
 
             if (!string.IsNullOrEmpty(fr.OutputPath))
             {
                 var path = fr.OutputPath.Replace('/', '\\');
-                var cached = _gridCache.Get(path);
-                if (cached != null)
+                if (File.Exists(path))
                 {
-                    thumb.Image = cached;
-                }
-                else if (File.Exists(path))
-                {
-                    thumbsToLoad.Add((thumb, path));
-                }
-            }
-        }
-
-        // Step 1: 后台并行加载（优先磁盘缓存，缓存未命中才 WIC 解码）
-        var decodeResults = new List<(FrameThumbnail thumb, string path, DecodedImage decoded, bool fromCache)>();
-        int maxConcurrent = Math.Min(Environment.ProcessorCount, 16);
-        var semaphore = new SemaphoreSlim(maxConcurrent);
-        var tasks = thumbsToLoad.Select(async item =>
-        {
-            await semaphore.WaitAsync(CancellationToken.None);
-            try
-            {
-                if (ct.IsCancellationRequested) return;
-
-                DecodedImage? decoded = null;
-                bool fromCache = false;
-
-                var cacheKey = ImageHelper.GetCacheKey(item.path);
-                if (!string.IsNullOrEmpty(cacheKey))
-                {
-                    var cachePath = ImageHelper.GetCachePath(cacheDir, cacheKey);
-                    decoded = ImageHelper.LoadThumbnailCache(cachePath);
-                    if (decoded != null) fromCache = true;
-                }
-
-                if (decoded == null && !ct.IsCancellationRequested)
-                    decoded = await ImageHelper.DecodeAsync(item.path, decodePixelWidth: 240);
-
-                if (decoded != null)
-                    lock (decodeResults)
-                        decodeResults.Add((item.thumb, item.path, decoded, fromCache));
-            }
-            finally
-            {
-                semaphore.Release();
-            }
-        });
-        await Task.WhenAll(tasks);
-
-        // Step 2: 仅保存磁盘缓存，不创建 SoftwareBitmapSource
-        // source 创建由 Page 的虚拟化滚动（LoadThumbnailRangeAsync）按需触发
-        foreach (var item in decodeResults)
-        {
-            if (ct.IsCancellationRequested)
-            {
-                item.decoded?.Dispose();
-                continue;
-            }
-
-            try
-            {
-                if (!item.fromCache)
-                {
-                    var cacheKey = ImageHelper.GetCacheKey(item.path);
-                    if (!string.IsNullOrEmpty(cacheKey))
+                    thumb.Image = new BitmapImage
                     {
-                        var cachePath = ImageHelper.GetCachePath(cacheDir, cacheKey);
-                        ImageHelper.SaveThumbnailCache(item.decoded, cachePath);
-                    }
+                        DecodePixelWidth = 240,
+                        UriSource = new Uri(path)
+                    };
                 }
-                item.decoded?.Dispose();
             }
-            catch
-            {
-                item.decoded?.Dispose();
-            }
-        }
 
-        // 触发初始可见范围加载（Page 后续通过 scroll 事件动态调整）
-        await LoadThumbnailRangeAsync(0, Math.Min(GridThumbnails.Count - 1, _initialVisibleCount - 1));
+            GridThumbnails.Add(thumb);
+        }
     }
 
-    /// <summary>由 Page 设置：当前网格可见的项数（用于 RefreshGrid 初始加载范围）</summary>
-    public int _initialVisibleCount = 40;
-
     /// <summary>
-    /// 为指定索引范围内缺失 Image 的缩略图创建 SoftwareBitmapSource。
-    /// 虚拟化核心：仅加载可见区域 + 缓冲区，不一次性创建全部 D2D 纹理。
+    /// 为指定索引范围内缺失 Image 的缩略图创建 BitmapImage。
+    /// BitmapImage+URI 由 XAML 内部管理纹理池，无数量限制。
     /// </summary>
-    /// <param name="startIdx">起始索引（含）</param>
-    /// <param name="endIdx">结束索引（含）</param>
-    public async Task LoadThumbnailRangeAsync(int startIdx, int endIdx)
+    public void LoadThumbnailRange(int startIdx, int endIdx)
     {
-        // 取消上一次未完成的加载
-        _thumbnailCts?.Cancel();
-        _thumbnailCts = new CancellationTokenSource();
-        var ct = _thumbnailCts.Token;
-
         startIdx = Math.Max(0, startIdx);
         endIdx = Math.Min(endIdx, GridThumbnails.Count - 1);
         if (startIdx > endIdx) return;
 
-        var thumbsToLoad = new List<(FrameThumbnail thumb, string path)>();
         for (int i = startIdx; i <= endIdx; i++)
         {
             var thumb = GridThumbnails[i];
             if (thumb.Image != null || string.IsNullOrEmpty(thumb.OutputPath)) continue;
             var path = thumb.OutputPath.Replace('/', '\\');
-            var cached = _gridCache.Get(path);
-            if (cached != null)
+            thumb.Image = new BitmapImage
             {
-                thumb.Image = cached;
-            }
-            else if (File.Exists(path))
-            {
-                thumbsToLoad.Add((thumb, path));
-            }
-        }
-
-        if (thumbsToLoad.Count == 0) return;
-
-        System.Diagnostics.Trace.WriteLine($"[VM] LoadRange [{startIdx}..{endIdx}]: {thumbsToLoad.Count} 待创建");
-
-        // 后台并行解码（优先磁盘缓存）
-        var cacheDir = SettingsService.ThumbnailCacheDir;
-        var decodeResults = new List<(FrameThumbnail thumb, string path, DecodedImage decoded, bool fromCache)>();
-        int maxConcurrent = Math.Min(Environment.ProcessorCount, 8);
-        var semaphore = new SemaphoreSlim(maxConcurrent);
-        var tasks = thumbsToLoad.Select(async item =>
-        {
-            await semaphore.WaitAsync(CancellationToken.None);
-            try
-            {
-                if (ct.IsCancellationRequested) return;
-
-                DecodedImage? decoded = null;
-                bool fromCache = false;
-
-                var cacheKey = ImageHelper.GetCacheKey(item.path);
-                if (!string.IsNullOrEmpty(cacheKey))
-                {
-                    var cachePath = ImageHelper.GetCachePath(cacheDir, cacheKey);
-                    decoded = ImageHelper.LoadThumbnailCache(cachePath);
-                    if (decoded != null) fromCache = true;
-                }
-
-                if (decoded == null && !ct.IsCancellationRequested)
-                    decoded = await Helpers.ImageHelper.DecodeAsync(item.path, decodePixelWidth: 240);
-
-                if (decoded != null)
-                    lock (decodeResults)
-                        decodeResults.Add((item.thumb, item.path, decoded, fromCache));
-            }
-            finally { semaphore.Release(); }
-        });
-        await Task.WhenAll(tasks);
-
-        // UI 线程逐个创建 SoftwareBitmapSource（强制 WARP 纹理上限）
-        int createdCount = 0;
-        foreach (var item in decodeResults)
-        {
-            if (ct.IsCancellationRequested)
-            {
-                item.decoded?.Dispose();
-                continue;
-            }
-
-            try
-            {
-                if (!item.fromCache)
-                {
-                    var cacheKey = ImageHelper.GetCacheKey(item.path);
-                    if (!string.IsNullOrEmpty(cacheKey))
-                    {
-                        var cachePath = ImageHelper.GetCachePath(cacheDir, cacheKey);
-                        ImageHelper.SaveThumbnailCache(item.decoded, cachePath);
-                    }
-                }
-
-                // WARP 设备并发纹理限制：创建前先确保存活数不超标
-                int aliveCount = CountAliveGridSources();
-                if (aliveCount >= MAX_ALIVE_GRID_SOURCES)
-                {
-                    // 回收距离当前加载范围最远的 source
-                    RecycleFarthestSources(startIdx, endIdx, aliveCount - MAX_ALIVE_GRID_SOURCES + 1);
-                }
-
-                var source = await Helpers.ImageHelper.CreateSourceAsync(item.decoded);
-                if (source != null && !ct.IsCancellationRequested)
-                {
-                    _gridCache.Put(item.path, source);
-                    item.thumb.Image = source;
-                    createdCount++;
-                }
-                else if (source != null)
-                {
-                    ScheduleDispose(source);
-                }
-            }
-            catch
-            {
-                item.decoded?.Dispose();
-            }
-
-            // 每 4 张让出 UI 线程
-            if (createdCount % 4 == 0)
-                await Task.Delay(16);
+                DecodePixelWidth = 240,
+                UriSource = new Uri(path)
+            };
         }
     }
 
     /// <summary>
-    /// 回收可视区域之外的缩略图 D2D 纹理（ScheduleDispose + 设 Image=null）。
-    /// 保留 keepStart..keepEnd 范围内的 source 不回收。
+    /// 回收可视区域之外的缩略图（BitmapImage 无需 Dispose，直接置空让 GC 回收）。
+    /// 保留 keepStart..keepEnd 范围内的图片不回收。
     /// </summary>
     public void RecycleThumbnailsOutsideRange(int keepStart, int keepEnd)
     {
         keepStart = Math.Max(0, keepStart);
         keepEnd = Math.Min(keepEnd, GridThumbnails.Count - 1);
 
-        int recycled = 0;
         for (int i = 0; i < GridThumbnails.Count; i++)
         {
             if (i >= keepStart && i <= keepEnd) continue;
             var thumb = GridThumbnails[i];
-            if (thumb.Image == null) continue;
-
-            var cacheKey = thumb.OutputPath?.Replace('/', '\\');
-            if (!string.IsNullOrEmpty(cacheKey)) _gridCache.Remove(cacheKey);
-            ScheduleDispose(thumb.Image);
-            thumb.Image = null;
-            recycled++;
-        }
-
-        if (recycled > 0)
-        {
-            FlushPendingDispose(forceAll: true);
-            System.Diagnostics.Trace.WriteLine($"[VM] RecycleThumbs: 回收 {recycled} 个 (保留 [{keepStart}..{keepEnd}])");
+            if (thumb.Image != null)
+                thumb.Image = null;
         }
     }
 
-    private int CountAliveGridSources()
-    {
-        int count = 0;
-        for (int i = 0; i < GridThumbnails.Count; i++)
-            if (GridThumbnails[i].Image != null) count++;
-        return count;
-    }
-
-    private void RecycleFarthestSources(int rangeStart, int rangeEnd, int recycleCount)
-    {
-        if (recycleCount <= 0) return;
-        int rangeMid = (rangeStart + rangeEnd) / 2;
-
-        // 收集所有有 Image 且在目标范围之外的索引，按距离降序排列
-        var candidates = new List<(int idx, int dist)>();
-        for (int i = 0; i < GridThumbnails.Count; i++)
-        {
-            if (GridThumbnails[i].Image == null) continue;
-            if (i >= rangeStart && i <= rangeEnd) continue;
-            int dist = Math.Abs(i - rangeMid);
-            candidates.Add((i, dist));
-        }
-        candidates.Sort((a, b) => b.dist.CompareTo(a.dist));
-
-        int recycled = 0;
-        foreach (var (idx, _) in candidates)
-        {
-            if (recycled >= recycleCount) break;
-            var thumb = GridThumbnails[idx];
-            if (thumb.Image == null) continue;
-            var cacheKey = thumb.OutputPath?.Replace('/', '\\');
-            if (!string.IsNullOrEmpty(cacheKey)) _gridCache.Remove(cacheKey);
-            ScheduleDispose(thumb.Image);
-            thumb.Image = null;
-            recycled++;
-        }
-
-        // 范围外不够回收时，从范围两端向内回收
-        if (recycled < recycleCount)
-        {
-            for (int d = 0; d < GridThumbnails.Count && recycled < recycleCount; d++)
-            {
-                foreach (int i in new[] { rangeStart - 1 - d, rangeEnd + 1 + d })
-                {
-                    if (i < 0 || i >= GridThumbnails.Count) continue;
-                    var thumb = GridThumbnails[i];
-                    if (thumb.Image == null) continue;
-                    var ck = thumb.OutputPath?.Replace('/', '\\');
-                    if (!string.IsNullOrEmpty(ck)) _gridCache.Remove(ck);
-                    ScheduleDispose(thumb.Image);
-                    thumb.Image = null;
-                    recycled++;
-                    if (recycled >= recycleCount) break;
-                }
-            }
-        }
-
-        if (recycled > 0)
-        {
-            // WARP 设备必须立即释放纹理槽位，否则新 CreateSourceAsync 仍会撞上限
-            FlushPendingDispose(forceAll: true);
-            System.Diagnostics.Trace.WriteLine($"[VM] RecycleFarthest: 回收 {recycled} 个纹理 (为加载 [{rangeStart}..{rangeEnd}] 腾出空间)");
-        }
-    }
-
-    /// <summary>
-    /// 兼容旧调用：加载初始可见范围的缩略图。
-    /// Page 应优先直接调用 LoadThumbnailRangeAsync 并传入精确范围。
-    /// </summary>
-    public Task LoadMissingThumbnailsAsync()
-    {
-        int count = Math.Min(GridThumbnails.Count, _initialVisibleCount);
-        return LoadThumbnailRangeAsync(0, count - 1);
-    }
-
-    /// <summary>释放网格缩略图占用的内存（SoftwareBitmapSource 必须在 UI 线程 Dispose）</summary>
+    /// <summary>清空网格缩略图（BitmapImage 由 GC 自动回收，无需手动 Dispose）</summary>
     public void ClearGridThumbnails()
     {
         foreach (var thumb in GridThumbnails)
-        {
-            // 必须通过 ScheduleDispose 在 UI 线程延迟释放 D2D 纹理
-            // 直接设 null 会导致 GC finalizer 在非 UI 线程调用 Close → FailFast 0xC000027B
-            ScheduleDispose(thumb.Image);
             thumb.Image = null;
-        }
         GridThumbnails.Clear();
-        _gridCache.Clear();
     }
 
     // ── 日志 ────────────────────────────────────────────────────────

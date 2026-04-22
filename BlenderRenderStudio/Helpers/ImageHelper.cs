@@ -255,6 +255,23 @@ public static class ImageHelper
         catch { return null; }
     }
 
+    /// <summary>
+    /// 后台线程安全版：直接从已拷贝的像素数组写缓存文件（不依赖 SoftwareBitmap）。
+    /// </summary>
+    public static void SaveThumbnailCacheRaw(byte[] pixels, int width, int height, string cachePath)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+            using var fs = new FileStream(cachePath, FileMode.Create, FileAccess.Write,
+                FileShare.None, bufferSize: 81920);
+            fs.Write(BitConverter.GetBytes(width));
+            fs.Write(BitConverter.GetBytes(height));
+            fs.Write(pixels);
+        }
+        catch { /* 写缓存失败不影响主流程 */ }
+    }
+
     /// <summary>获取缓存文件完整路径</summary>
     public static string GetCachePath(string cacheDir, string cacheKey)
         => Path.Combine(cacheDir, cacheKey + ".raw");

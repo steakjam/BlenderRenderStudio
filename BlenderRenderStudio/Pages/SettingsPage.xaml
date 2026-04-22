@@ -38,6 +38,21 @@
 
             <MenuFlyoutSeparator Margin="0,12" />
 
+            <!-- 分布式渲染 -->
+            <TextBlock Text="分布式渲染" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,0,0,8" />
+            <ToggleSwitch x:Name="RemoteWorkerToggle" Header="允许接收远程渲染任务"
+                          OnContent="已启用（其他设备可向本机分配渲染任务）" OffContent="已关闭"
+                          Toggled="RemoteWorker_Toggled" />
+            <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,8,0,0">
+                <TextBox x:Name="DeviceNameBox" Header="设备名称" Width="200" FontSize="13"
+                         TextChanged="DeviceName_Changed" />
+                <NumberBox x:Name="NetworkPortBox" Header="端口" Width="100"
+                           Minimum="1024" Maximum="65535" SpinButtonPlacementMode="Hidden"
+                           ValueChanged="NetworkPort_Changed" />
+            </StackPanel>
+
+            <MenuFlyoutSeparator Margin="0,12" />
+
             <!-- 系统 -->
             <TextBlock Text="系统" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,0,0,8" />
             <ToggleSwitch x:Name="AutoStartToggle" Header="开机自启动" Toggled="AutoStart_Toggled" />

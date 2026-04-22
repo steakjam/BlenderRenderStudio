@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -125,4 +126,22 @@ public class UserSettings
 
     [JsonPropertyName("showLogPanel")]
     public bool ShowLogPanel { get; set; } = false;
+
+    // ── 分布式渲染 / 网络设置 ──
+
+    /// <summary>是否允许接收远程渲染任务（Worker 模式）</summary>
+    [JsonPropertyName("enableRemoteWorker")]
+    public bool EnableRemoteWorker { get; set; } = false;
+
+    /// <summary>网络服务监听端口（HTTP + UDP 发现）</summary>
+    [JsonPropertyName("networkPort")]
+    public int NetworkPort { get; set; } = 19821;
+
+    /// <summary>本机在分布式渲染中的设备名称</summary>
+    [JsonPropertyName("deviceName")]
+    public string DeviceName { get; set; } = Environment.MachineName;
+
+    /// <summary>已保存的远程设备列表（JSON 序列化）</summary>
+    [JsonPropertyName("remoteDevices")]
+    public List<Models.RemoteDevice> RemoteDevices { get; set; } = [];
 }

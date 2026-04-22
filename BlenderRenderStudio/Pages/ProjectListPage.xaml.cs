@@ -2,6 +2,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using BlenderRenderStudio.Models;
 using BlenderRenderStudio.Services;
 using Microsoft.UI.Xaml;
@@ -88,24 +89,156 @@ public sealed partial class ProjectListPage : Page
             WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
 
             var file = await picker.PickSingleFileAsync();
-            if (file != null)
+            if (file == null) return;
+
+            // 预读归档信息
+            var (preview, blendFileName, frameCount) = ProjectService.PreviewImport(file.Path);
+            if (preview == null)
             {
-                var project = ProjectService.Import(file.Path);
-                if (project != null)
+                await new ContentDialog
                 {
-                    RefreshProjects();
-                    NavigateToProject?.Invoke(project);
-                }
-                else
+                    Title = "导入失败",
+                    Content = "文件格式无效或已损坏。",
+                    CloseButtonText = "确定",
+                    XamlRoot = this.XamlRoot,
+                }.ShowAsync();
+                return;
+            }
+
+            var settings = SettingsService.Load();
+
+            // 归档内容摘要
+            var summary = $"项目：{preview.Name}\n"
+                + $"帧范围：{preview.StartFrame} ~ {preview.EndFrame}\n"
+                + (blendFileName != null ? $"Blend 工程：{blendFileName}\n" : "Blend 工程：未包含\n")
+                + $"已渲染帧：{frameCount} 个";
+            var summaryBlock = new TextBlock
+            {
+                Text = summary,
+                TextWrapping = Microsoft.UI.Xaml.TextWrapping.Wrap,
+                Opacity = 0.8,
+                Margin = new Thickness(0, 0, 0, 8),
+            };
+
+            // Blend 文件存放目录
+            var blendDirBox = new TextBox
+            {
+                Header = "Blend 工程存放目录",
+                PlaceholderText = "手动输入或点击下方按钮选择目录",
+            };
+            var blendDirBtn = new Button { Content = "选择目录", Margin = new Thickness(0, 4, 0, 0) };
+            blendDirBtn.Click += async (_, _) =>
+            {
+                var fp = new FolderPicker();
+                fp.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+                fp.FileTypeFilter.Add("*");
+                WinRT.Interop.InitializeWithWindow.Initialize(fp, hwnd);
+                var folder = await fp.PickSingleFolderAsync();
+                if (folder != null) blendDirBox.Text = folder.Path;
+            };
+
+            // 渲染输出目录
+            var outputDirBox = new TextBox
+            {
+                Header = "渲染输出目录",
+                PlaceholderText = "手动输入或点击下方按钮选择目录",
+            };
+            var outputDirBtn = new Button { Content = "选择目录", Margin = new Thickness(0, 4, 0, 0) };
+            outputDirBtn.Click += async (_, _) =>
+            {
+                var fp = new FolderPicker();
+                fp.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+                fp.FileTypeFilter.Add("*");
+                WinRT.Interop.InitializeWithWindow.Initialize(fp, hwnd);
+                var folder = await fp.PickSingleFolderAsync();
+                if (folder != null) outputDirBox.Text = folder.Path;
+            };
+
+            // Blender 路径（本机已安装）
+            var blenderPathBox = new TextBox
+            {
+                Header = "Blender 可执行文件路径",
+                Text = settings.BlenderPath,
+                PlaceholderText = "手动输入或点击下方按钮浏览",
+            };
+            var blenderPathBtn = new Button { Content = "浏览...", Margin = new Thickness(0, 4, 0, 0) };
+            blenderPathBtn.Click += async (_, _) =>
+            {
+                var bp = new FileOpenPicker();
+                bp.SuggestedStartLocation = PickerLocationId.ComputerFolder;
+                bp.FileTypeFilter.Add(".exe");
+                WinRT.Interop.InitializeWithWindow.Initialize(bp, hwnd);
+                var bf = await bp.PickSingleFileAsync();
+                if (bf != null) blenderPathBox.Text = bf.Path;
+            };
+
+            var panel = new StackPanel { Spacing = 6, MinWidth = 420 };
+            panel.Children.Add(summaryBlock);
+            panel.Children.Add(blendDirBox);
+            panel.Children.Add(blendDirBtn);
+            panel.Children.Add(outputDirBox);
+            panel.Children.Add(outputDirBtn);
+            panel.Children.Add(blenderPathBox);
+            panel.Children.Add(blenderPathBtn);
+
+            var configDialog = new ContentDialog
+            {
+                Title = "导入项目",
+                Content = panel,
+                PrimaryButtonText = "导入",
+                CloseButtonText = "取消",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = this.XamlRoot,
+            };
+
+            var configResult = await configDialog.ShowAsync();
+            if (configResult != ContentDialogResult.Primary) return;
+
+            var blendDir = blendDirBox.Text.Trim();
+            var outputDir = outputDirBox.Text.Trim();
+            var blenderPath = blenderPathBox.Text.Trim();
+
+            if (string.IsNullOrEmpty(blendDir) || string.IsNullOrEmpty(outputDir))
+            {
+                await new ContentDialog
                 {
-                    await new ContentDialog
-                    {
-                        Title = "导入失败",
-                        Content = "文件格式无效或已损坏。",
-                        CloseButtonText = "确定",
-                        XamlRoot = this.XamlRoot,
-                    }.ShowAsync();
-                }
+                    Title = "配置不完整",
+                    Content = "Blend 工程目录和渲染输出目录不能为空。",
+                    CloseButtonText = "确定",
+                    XamlRoot = this.XamlRoot,
+                }.ShowAsync();
+                return;
+            }
+
+            // 显示导入进度对话框
+            var progressDialog = CreateProgressDialog("导入项目", $"正在导入「{preview.Name}」…");
+            var dialogTask = progressDialog.ShowAsync();
+            // 确保对话框已渲染再开始后台任务
+            await Task.Yield();
+
+            RenderProject? project = null;
+            await Task.Run(() =>
+            {
+                try { project = ProjectService.Import(file.Path, blendDir, outputDir, blenderPath); }
+                catch { }
+            });
+
+            progressDialog.Hide();
+
+            if (project != null)
+            {
+                RefreshProjects();
+                NavigateToProject?.Invoke(project);
+            }
+            else
+            {
+                await new ContentDialog
+                {
+                    Title = "导入失败",
+                    Content = "导入过程中出现错误，请检查路径是否正确。",
+                    CloseButtonText = "确定",
+                    XamlRoot = this.XamlRoot,
+                }.ShowAsync();
             }
         }
         catch { }
@@ -119,23 +252,6 @@ public sealed partial class ProjectListPage : Page
 
         try
         {
-            // 询问是否包含渲染进度
-            var includeProgress = false;
-            var dialog = new ContentDialog
-            {
-                Title = "导出项目",
-                Content = new CheckBox { Content = "包含渲染进度和缩略图缓存", IsChecked = false },
-                PrimaryButtonText = "导出",
-                CloseButtonText = "取消",
-                DefaultButton = ContentDialogButton.Primary,
-                XamlRoot = this.XamlRoot,
-            };
-            var result = await dialog.ShowAsync();
-            if (result != ContentDialogResult.Primary) return;
-
-            if (dialog.Content is CheckBox cb)
-                includeProgress = cb.IsChecked == true;
-
             // 选择保存位置
             var picker = new FileSavePicker();
             picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
@@ -146,10 +262,30 @@ public sealed partial class ProjectListPage : Page
             WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
 
             var file = await picker.PickSaveFileAsync();
-            if (file != null)
+            if (file == null) return;
+
+            // 显示导出进度对话框
+            var progressDialog = CreateProgressDialog("导出项目", $"正在导出「{project.Name}」…");
+            var dialogTask = progressDialog.ShowAsync();
+            // 确保对话框已渲染再开始后台任务
+            await Task.Yield();
+
+            bool success = false;
+            await Task.Run(() =>
             {
-                ProjectService.Export(id, file.Path, includeProgress);
-            }
+                try { ProjectService.Export(id, file.Path); success = true; }
+                catch { }
+            });
+
+            progressDialog.Hide();
+
+            await new ContentDialog
+            {
+                Title = success ? "导出完成" : "导出失败",
+                Content = success ? $"项目已导出到：\n{file.Path}" : "导出过程中出现错误，请检查磁盘空间。",
+                CloseButtonText = "确定",
+                XamlRoot = this.XamlRoot,
+            }.ShowAsync();
         }
         catch { }
     }
@@ -205,5 +341,25 @@ public sealed partial class ProjectListPage : Page
             }
         }
         catch { }
+    }
+
+    /// <summary>创建带 ProgressRing 的进度对话框（无按钮，需代码 Hide）</summary>
+    private ContentDialog CreateProgressDialog(string title, string message)
+    {
+        var panel = new StackPanel { Spacing = 16, HorizontalAlignment = HorizontalAlignment.Center };
+        panel.Children.Add(new ProgressRing { IsActive = true, Width = 40, Height = 40 });
+        panel.Children.Add(new TextBlock
+        {
+            Text = message,
+            TextWrapping = Microsoft.UI.Xaml.TextWrapping.Wrap,
+            HorizontalAlignment = HorizontalAlignment.Center,
+        });
+
+        return new ContentDialog
+        {
+            Title = title,
+            Content = panel,
+            XamlRoot = this.XamlRoot,
+        };
     }
 }

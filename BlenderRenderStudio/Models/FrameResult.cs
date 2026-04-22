@@ -75,6 +75,9 @@ public class FrameThumbnail : ObservableObject
     public int FrameNumber { get; init; }
     public string OutputPath { get; set; } = string.Empty;
 
+    /// <summary>预计算的磁盘缓存键（MD5），避免 LoadRange 时重复调用 GetCacheKey</summary>
+    public string? CacheKey { get; set; }
+
     public FrameStatus Status
     {
         get => _status;

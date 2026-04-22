@@ -111,16 +111,20 @@
                                 <ColumnDefinition Width="*" />
                             </Grid.ColumnDefinitions>
                             <NumberBox Header="起始帧" Value="{x:Bind ViewModel.StartFrame, Mode=TwoWay}" Minimum="0"
+                                       SpinButtonPlacementMode="Hidden"
                                        IsEnabled="{x:Bind ViewModel.IsNotRendering, Mode=OneWay}" />
                             <NumberBox Grid.Column="1" Header="结束帧" Value="{x:Bind ViewModel.EndFrame, Mode=TwoWay}" Minimum="0"
+                                       SpinButtonPlacementMode="Hidden"
                                        IsEnabled="{x:Bind ViewModel.IsNotRendering, Mode=OneWay}" />
                         </Grid>
 
                         <NumberBox Header="帧号" Value="{x:Bind ViewModel.SingleFrameNumber, Mode=TwoWay}" Minimum="0"
+                                   SpinButtonPlacementMode="Hidden"
                                    IsEnabled="{x:Bind ViewModel.IsNotRendering, Mode=OneWay}"
                                    Visibility="{x:Bind ViewModel.IsSingleFrame, Mode=OneWay}" />
 
                         <NumberBox Header="批大小" Value="{x:Bind ViewModel.BatchSize, Mode=TwoWay}" Minimum="1" Maximum="9999"
+                                   SpinButtonPlacementMode="Hidden"
                                    IsEnabled="{x:Bind ViewModel.IsNotRendering, Mode=OneWay}"
                                    Visibility="{x:Bind ViewModel.ShowBatchSize, Mode=OneWay}" Margin="0,8,0,0" />
 
@@ -136,9 +140,9 @@
                                 <Grid ColumnSpacing="12">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                     <NumberBox Header="阈值 %" Value="{x:Bind ViewModel.MemoryThreshold, Mode=TwoWay}" Minimum="50" Maximum="99"
-                                               SpinButtonPlacementMode="Inline" IsEnabled="{x:Bind ViewModel.IsNotRendering, Mode=OneWay}" />
+                                               SpinButtonPlacementMode="Hidden" IsEnabled="{x:Bind ViewModel.IsNotRendering, Mode=OneWay}" />
                                     <NumberBox Grid.Column="1" Header="轮询(秒)" Value="{x:Bind ViewModel.MemoryPollSeconds, Mode=TwoWay}"
-                                               Minimum="0.5" Maximum="60" SpinButtonPlacementMode="Inline"
+                                               Minimum="0.5" Maximum="60" SpinButtonPlacementMode="Hidden"
                                                IsEnabled="{x:Bind ViewModel.IsNotRendering, Mode=OneWay}" />
                                 </Grid>
                                 <ToggleSwitch Header="崩溃自动重启" IsOn="{x:Bind ViewModel.AutoRestartOnCrash, Mode=TwoWay}"

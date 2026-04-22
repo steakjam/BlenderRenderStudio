@@ -59,6 +59,7 @@ public sealed partial class ProjectWorkspacePage : Page
     private ScrollViewer? _gridScrollViewer;
     private DispatcherTimer? _scrollDebounceTimer;
     private bool _scrollDirty;
+    private double _lastScrollOffset; // 滚动方向检测
 
     /// <param name="existingViewModel">传入已有 ViewModel 时复用（保留渲染状态），null 则创建新实例</param>
     public ProjectWorkspacePage(RenderProject project, SafeDispatcher safeDispatcher, MainViewModel? existingViewModel = null)
@@ -108,8 +109,9 @@ public sealed partial class ProjectWorkspacePage : Page
         // 监听项目模型变化（RenderRecovery 轮询更新 project.Status/CompletedFrames）
         _project.PropertyChanged += Project_PropertyChanged;
 
-        // 页面加载时恢复已渲染帧预览
+        // 页面加载时恢复已渲染帧预览 + 隐藏 NumberBox 内部清除按钮
         Loaded += OnLoaded;
+        Loaded += (_, _) => HideNumberBoxDeleteButtons(this);
 
         // 页面卸载时清理
         Unloaded += OnUnloaded;
@@ -209,8 +211,7 @@ public sealed partial class ProjectWorkspacePage : Page
             if (ViewModel.IsGridView && ViewModel.GridThumbnails.Count > 0)
             {
                 int visibleCount = GetGridVisibleItemCount();
-                ViewModel._initialVisibleCount = visibleCount;
-                await ViewModel.LoadThumbnailRangeAsync(0, visibleCount - 1);
+                ViewModel.LoadThumbnailRange(0, visibleCount - 1);
                 HookGridScrollViewer();
             }
         }
@@ -218,6 +219,68 @@ public sealed partial class ProjectWorkspacePage : Page
         {
             System.Diagnostics.Trace.WriteLine($"[WORKSPACE] OnLoaded 异常: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
         }
+    }
+
+    /// <summary>
+    /// 递归查找页面中所有 NumberBox，隐藏其内部 TextBox 的清除按钮(X)。
+    /// 使用 MaxWidth=0 而非 Visibility.Collapsed，确保不被 VisualStateManager 覆盖。
+    /// </summary>
+    private static void HideNumberBoxDeleteButtons(DependencyObject root)
+    {
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is NumberBox nb)
+            {
+                // NumberBox 内部的 TextBox 模板在首次渲染后才生成
+                // 通过 LayoutUpdated 确保模板已加载
+                void handler(object? s, object ea)
+                {
+                    var textBox = FindChild<TextBox>(nb);
+                    if (textBox == null) return;
+                    textBox.ApplyTemplate();
+                    var deleteBtn = FindChildByName(textBox, "DeleteButton");
+                    if (deleteBtn != null)
+                    {
+                        deleteBtn.MaxWidth = 0;
+                        deleteBtn.MaxHeight = 0;
+                        nb.LayoutUpdated -= handler;
+                    }
+                }
+                nb.LayoutUpdated += handler;
+            }
+            else
+            {
+                HideNumberBoxDeleteButtons(child);
+            }
+        }
+    }
+
+    private static T? FindChild<T>(DependencyObject parent) where T : DependencyObject
+    {
+        int count = VisualTreeHelper.GetChildrenCount(parent);
+        for (int i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T result) return result;
+            var deeper = FindChild<T>(child);
+            if (deeper != null) return deeper;
+        }
+        return null;
+    }
+
+    private static FrameworkElement? FindChildByName(DependencyObject parent, string name)
+    {
+        int count = VisualTreeHelper.GetChildrenCount(parent);
+        for (int i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is FrameworkElement fe && fe.Name == name) return fe;
+            var deeper = FindChildByName(child, name);
+            if (deeper != null) return deeper;
+        }
+        return null;
     }
 
     /// <summary>
@@ -230,9 +293,7 @@ public sealed partial class ProjectWorkspacePage : Page
         if (ViewModel.IsRendering && ViewModel.IsRenderingLocally)
         {
             System.Diagnostics.Trace.WriteLine($"[RestoreFrames] 渲染中重入，重建缩略图");
-            int visibleCount = GetGridVisibleItemCount();
-            ViewModel._initialVisibleCount = visibleCount;
-            await ViewModel.RefreshGridThumbnailsAsync();
+            ViewModel.RefreshGridThumbnails();
             HookGridScrollViewer();
             var currentResult = ViewModel.FrameResults.LastOrDefault(f => f.Status == FrameStatus.Completed);
             if (currentResult != null && !string.IsNullOrEmpty(currentResult.OutputPath))
@@ -303,12 +364,15 @@ public sealed partial class ProjectWorkspacePage : Page
                     OutputPath = found.path ?? string.Empty,
                 };
                 ViewModel.FrameResults.Add(fr);
-                ViewModel.GridThumbnails.Add(new FrameThumbnail
+                var thumbNew = new FrameThumbnail
                 {
                     FrameNumber = i,
                     OutputPath = fr.OutputPath,
                     Status = fr.Status,
-                });
+                };
+                if (!string.IsNullOrEmpty(fr.OutputPath))
+                    thumbNew.CacheKey = Helpers.ImageHelper.GetCacheKey(fr.OutputPath.Replace('/', '\\'));
+                ViewModel.GridThumbnails.Add(thumbNew);
             }
 
             ViewModel.CompletedFrames = foundFrames.Count;
@@ -332,6 +396,7 @@ public sealed partial class ProjectWorkspacePage : Page
         }
 
         // 定位播放头到最后完成帧，并加载预览
+        if (!IsLoaded) return; // 页面已卸载，跳过预览加载
         var lastCompleted = foundFrames[^1];
         _selectedFrameIndex = lastCompleted.frame - start;
         System.Diagnostics.Trace.WriteLine($"[RestoreFrames] 准备加载预览: frame={lastCompleted.frame}, pageHash={GetHashCode()}, IsLoaded={IsLoaded}");
@@ -427,16 +492,15 @@ public sealed partial class ProjectWorkspacePage : Page
         ViewModel.IsGridView = false;
     }
 
-    private async void ToggleGridView_Click(object sender, RoutedEventArgs e)
+    private void ToggleGridView_Click(object sender, RoutedEventArgs e)
     {
         BtnSingleView.IsChecked = false;
         BtnGridView.IsChecked = true;
         ViewModel.IsGridView = true;
 
-        // 首次切换到网格视图时，仅加载当前可见范围的缩略图
+        // 首次切换到网格视图时，加载当前可见范围的缩略图
         int visibleCount = GetGridVisibleItemCount();
-        ViewModel._initialVisibleCount = visibleCount;
-        await ViewModel.LoadThumbnailRangeAsync(0, visibleCount - 1);
+        ViewModel.LoadThumbnailRange(0, visibleCount - 1);
 
         // 延迟挂载 ScrollViewer 事件（GridView 首次渲染后才有内部 ScrollViewer）
         HookGridScrollViewer();
@@ -761,15 +825,21 @@ public sealed partial class ProjectWorkspacePage : Page
                 : 0;
 
             using var decoded = await ImageHelper.DecodeAsync(fr.OutputPath, decodePixelWidth: decodeWidth == 0 ? 960 : decodeWidth);
+            if (!IsLoaded) return; // 页面已卸载，放弃后续操作
             if (decoded != null)
             {
                 ViewModel.SetRenderAspectRatio(decoded.PixelWidth, decoded.PixelHeight);
                 System.Diagnostics.Trace.WriteLine($"[WORKSPACE] LoadPreviewForFrame: 解码完成, 准备 CreateSourceAsync, pageHash={GetHashCode()}, IsLoaded={IsLoaded}");
                 var source = await ImageHelper.CreateSourceAsync(decoded);
-                if (source != null)
+                if (source != null && IsLoaded)
                 {
                     System.Diagnostics.Trace.WriteLine($"[WORKSPACE] LoadPreviewForFrame: 设置 PreviewImage, pageHash={GetHashCode()}");
                     ViewModel.PreviewImage = source;
+                }
+                else if (source != null)
+                {
+                    // 页面已卸载，当前仍在 UI 线程，直接释放即可
+                    ((IDisposable)source).Dispose();
                 }
             }
         }
@@ -979,12 +1049,15 @@ public sealed partial class ProjectWorkspacePage : Page
                         OutputPath = found.path ?? string.Empty,
                     };
                     ViewModel.FrameResults.Add(fr);
-                    ViewModel.GridThumbnails.Add(new FrameThumbnail
+                    var thumbNew2 = new FrameThumbnail
                     {
                         FrameNumber = i,
                         OutputPath = fr.OutputPath,
                         Status = fr.Status,
-                    });
+                    };
+                    if (!string.IsNullOrEmpty(fr.OutputPath))
+                        thumbNew2.CacheKey = Helpers.ImageHelper.GetCacheKey(fr.OutputPath.Replace('/', '\\'));
+                    ViewModel.GridThumbnails.Add(thumbNew2);
                 }
             }
             finally { ViewModel.IsBulkInserting = false; }
@@ -1079,34 +1152,55 @@ public sealed partial class ProjectWorkspacePage : Page
 
     private void GridScrollViewer_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
     {
-        // 滚动结束或中间帧都触发（防抖 150ms）
+        // 每次滚动事件重置定时器，只在停止滚动 200ms 后才触发加载
         _scrollDirty = true;
         if (_scrollDebounceTimer == null)
         {
-            _scrollDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+            _scrollDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
             _scrollDebounceTimer.Tick += ScrollDebounce_Tick;
-            _scrollDebounceTimer.Start();
         }
+        _scrollDebounceTimer.Stop();
+        _scrollDebounceTimer.Start();
     }
 
-    private async void ScrollDebounce_Tick(object? sender, object e)
+    private void ScrollDebounce_Tick(object? sender, object e)
     {
+        _scrollDebounceTimer?.Stop();
         if (!_scrollDirty) return;
         _scrollDirty = false;
 
         if (_gridScrollViewer == null || !ViewModel.IsGridView) return;
 
+        // 检测滚动方向
+        double currentOffset = _gridScrollViewer.VerticalOffset;
+        bool scrollingDown = currentOffset >= _lastScrollOffset;
+        _lastScrollOffset = currentOffset;
+
         var (visibleStart, visibleEnd) = GetVisibleIndexRange();
         int bufferItems = _gridColumns * 3; // BUFFER_ROWS=3 行缓冲
+        int visibleCount = visibleEnd - visibleStart + 1;
 
-        int loadStart = Math.Max(0, visibleStart - bufferItems);
-        int loadEnd = Math.Min(ViewModel.GridThumbnails.Count - 1, visibleEnd + bufferItems);
+        // 预加载方向：沿滚动方向多加载 1 屏
+        int prefetchItems = visibleCount;
+        int loadStart, loadEnd;
+        if (scrollingDown)
+        {
+            loadStart = Math.Max(0, visibleStart - bufferItems);
+            loadEnd = Math.Min(ViewModel.GridThumbnails.Count - 1, visibleEnd + bufferItems + prefetchItems);
+        }
+        else
+        {
+            loadStart = Math.Max(0, visibleStart - bufferItems - prefetchItems);
+            loadEnd = Math.Min(ViewModel.GridThumbnails.Count - 1, visibleEnd + bufferItems);
+        }
 
-        // 回收远离可视区域的 D2D 纹理
-        ViewModel.RecycleThumbnailsOutsideRange(loadStart, loadEnd);
+        // 回收远离可视区域的缩略图（BitmapImage 由 GC 自动回收）
+        int recycleStart = Math.Max(0, loadStart - visibleCount);
+        int recycleEnd = Math.Min(ViewModel.GridThumbnails.Count - 1, loadEnd + visibleCount);
+        ViewModel.RecycleThumbnailsOutsideRange(recycleStart, recycleEnd);
 
-        // 加载新进入可视区域的缩略图
-        await ViewModel.LoadThumbnailRangeAsync(loadStart, loadEnd);
+        // 加载新进入可视区域 + 预加载区域的缩略图
+        ViewModel.LoadThumbnailRange(loadStart, loadEnd);
     }
 
     /// <summary>根据 ScrollViewer 偏移量计算当前可见的 GridView 项索引范围</summary>
